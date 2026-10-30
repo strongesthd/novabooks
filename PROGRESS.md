@@ -64,13 +64,15 @@
 - `.ai/runs/copilot-instructions.md` đã đọc; cập nhật trạng thái và handover tại `PROGRESS.md`.
 
 ## 4. BƯỚC TIẾP THEO CẦN LÀM NGAY (Next Immediate Steps)
-- [ ] Theo dõi GitHub Actions sau commit `bd09769`; deploy chỉ tiếp tục nếu đủ 4 secrets trong environment `novabooks-production`.
-- [ ] Xác nhận migrations 006-007 đã chạy trên PostgreSQL deploy và kiểm tra API end-to-end.
+- [x] GitHub CI pass trên `bd09769` và commit handover `32fb0c6`; deploy workflow đã chạy với đủ secrets.
+- [ ] Khắc phục bước xác minh HTTPS/vhost trong deploy: workflow chạy migration và khởi động app, nhưng verification thất bại, deploy rollback cấu hình Nginx; kiểm tra route/domain/SNI trên VPS trước khi chạy lại.
+- [ ] Xác nhận migrations 006-007 đã được đăng ký trên PostgreSQL deploy và kiểm tra API end-to-end.
 - [ ] Nếu doanh nghiệp có workbook khác template NovaBooks, lấy file đã ẩn dữ liệu nhạy cảm để bổ sung mapping cột.
 
 ## 5. LƯU Ý KỸ THUẬT & LỖI CẦN TRÁNH (Notes & Blockers)
 - Docker Desktop hiện ở trạng thái `paused`; `docker compose up -d` không thể khởi động DB nên migration/API chưa được chạy thực tế.
 - Typecheck/build, cú pháp frontend, 7 unit tests, `npm audit --audit-level=moderate` và `git diff --check` đã pass sau thay đổi CRUD/phân trang.
+- GitHub Actions CI pass. Deploy runs cho `bd09769` và `32fb0c6` đều thất bại tại bước `Deploy and verify`; log cho thấy migration service kết thúc và app container khởi động, nhưng kiểm tra qua HTTPS không thành công. `nginx -t` thành công; chưa xác định chính xác phản hồi HTTPS do endpoint verification không in response body.
 - 5 bài test hiện là unit tests không cần DB; cần bổ sung/chạy integration tests RLS trên runtime role sau khi có PostgreSQL.
 - Không thể gửi Telegram/Zalo/TTS thật hoặc gọi Gemini nếu chưa có credentials; tích hợp phải fail rõ ràng, không giả lập thành công.
 - Giữ RLS, transaction-scoped tenant context và membership authorization; không dựa riêng vào WHERE ở repository.
