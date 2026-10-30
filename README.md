@@ -86,6 +86,15 @@ PostgreSQL chỉ nằm trên Docker network, không publish ra Internet. `DB_ADM
 - `TTS_API_KEY`, `TTS_VOICE_ID`: bật tổng hợp ElevenLabs và gửi voice qua Telegram. Zalo OA hiện nhận bản tin dạng văn bản.
 - `DAILY_REPORT_CRON`: thời gian gửi theo giờ địa phương của từng tenant, định dạng `phút giờ * * *` (ví dụ `0 18 * * *`).
 
+### Nhập sổ cái Excel và định khoản hóa đơn
+
+- Mở **Sổ sách → Tải mẫu Excel** để lấy workbook `.xlsx` chuẩn. Mỗi dòng là một tài khoản trong một bút toán; lặp lại số bút toán cho các dòng liên quan. Tổng Nợ/Có phải cân bằng cho từng bút toán.
+- **Nhập sổ Excel** sẽ kiểm tra dữ liệu, báo trùng số bút toán trước khi nhập, rồi nhập sổ lịch sử và lấy danh mục tài khoản theo tenant trong cùng transaction. Chỉ nhập dữ liệu lịch sử đã đối soát; các bút toán nhập được ghi trạng thái đã hạch toán và không chỉnh sửa/xóa được.
+- Sau khi nhập, mở **Cấu hình tài khoản** để chọn mặc định cho Chi phí/Hàng mua, Thuế GTGT đầu vào và Phải trả nhà cung cấp. Khi duyệt từng hóa đơn, kế toán có thể xác nhận hoặc đổi tài khoản riêng cho chứng từ đó.
+- Danh sách hàng hóa và nhà cung cấp có tìm kiếm, lọc trạng thái và phân trang; có thể sửa hoặc lưu trữ/khôi phục. Lưu trữ giữ nguyên liên kết và lịch sử chứng từ, không xóa cứng dữ liệu.
+- Bút toán đã hạch toán là bất biến, không hỗ trợ sửa/xóa trực tiếp. Dùng **Lập bút toán đảo** để tạo bút toán đối ứng vào ngày hiện tại; bút toán gốc được giữ nguyên và mỗi bút toán gốc chỉ được đảo một lần.
+- Excel là nguồn dữ liệu do doanh nghiệp cung cấp; NovaBooks không tự suy diễn danh mục hay ánh xạ tài khoản. Hãy kiểm tra kỹ mapping với kế toán trưởng trước khi duyệt.
+
 ## Tích hợp Telegram
 
 1. Tạo Bot qua BotFather và thêm Bot vào nhóm nhận chứng từ/báo cáo.

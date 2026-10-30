@@ -1,4 +1,4 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import express, { ErrorRequestHandler, NextFunction, Request, Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -19,10 +19,12 @@ import {
   closePool, pool, resolveWebhookChannel, withTenantTransaction, withWebhookTransaction
 } from "./db";
 import { startDailyReporter } from "./reporting";
+import { createLedgerTemplate, LedgerWorkbookError, parseLedgerWorkbook } from "./ledger";
 import { DocumentValidationError, loadDocument } from "./storage";
 import { AuthenticatedRequest, AuthContext, TenantRole } from "./types";
 import {
-  channelSchema, inviteSchema, loginSchema, productSchema, registerSchema, reviewSchema
+  channelSchema, inviteSchema, ledgerMappingSchema, loginSchema, productSchema, registerSchema, reviewSchema,
+  supplierSchema
 } from "./validation";
 import {
   createVoucherFromUpload, editVoucher, getVoucherDocument, HttpError, listVouchers,
@@ -234,7 +236,9 @@ app.post("/api/vouchers/:voucherId/review", authenticate, requireRoles("tenant_a
   try {
     const auth = (req as AuthenticatedRequest).auth;
     const input = reviewSchema.parse(req.body);
-    const result = await reviewVoucher(auth, uuidParam(req.params.voucherId), input.decision, input.note);
+    const result = await reviewVoucher(
+      auth, uuidParam(req.params.voucherId), input.decision, input.note, input.accountMappings
+    );
     res.json(result);
   } catch (error) {
     next(error);
@@ -244,19 +248,305 @@ app.post("/api/vouchers/:voucherId/review", authenticate, requireRoles("tenant_a
 app.get("/api/entries", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
   try {
     const auth = (req as AuthenticatedRequest).auth;
-    const entries = await withTenantTransaction(auth.tenantId, async (tx) => {
-      const result = await tx.query(
+    const options = parseListOptions(req);
+    const result = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const count = await tx.query<{ total: string }>(
+        `SELECT count(*)::text AS total FROM accounting_entries
+         WHERE ($1 = '' OR entry_number ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')`,
+        [options.search]
+      );
+      const entries = await tx.query(
         `SELECT e.id, e.entry_number, e.entry_date, e.description, e.currency, e.status,
+                e.reverses_entry_id,
+                (SELECT r.id FROM accounting_entries r
+                 WHERE r.tenant_id = e.tenant_id AND r.reverses_entry_id = e.id) AS reversal_entry_id,
                 COALESCE(sum(l.debit), 0)::text AS debit_total, e.created_at
          FROM accounting_entries e
          LEFT JOIN accounting_entry_lines l
            ON l.tenant_id = e.tenant_id AND l.accounting_entry_id = e.id
-         GROUP BY e.tenant_id, e.id ORDER BY e.entry_date DESC, e.created_at DESC LIMIT 200`
+         WHERE ($1 = '' OR e.entry_number ILIKE '%' || $1 || '%' OR e.description ILIKE '%' || $1 || '%')
+         GROUP BY e.tenant_id, e.id
+         ORDER BY e.entry_date DESC, e.created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [options.search, options.pageSize, options.offset]
       );
-      return result.rows;
+      return { entries: entries.rows, total: Number(count.rows[0]?.total ?? 0) };
     }, auth.userId);
-    res.json({ entries });
+    res.json({ ...result, page: options.page, pageSize: options.pageSize });
   } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/entries/:entryId/reverse", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const entryId = uuidParam(req.params.entryId);
+    const reversal = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const sourceResult = await tx.query<{
+        id: string;
+        entry_number: string;
+        description: string;
+        currency: string;
+        status: string;
+        reverses_entry_id: string | null;
+      }>(
+        `SELECT id, entry_number, description, currency, status, reverses_entry_id
+         FROM accounting_entries WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+        [auth.tenantId, entryId]
+      );
+      const source = sourceResult.rows[0];
+      if (!source) throw new HttpError(404, "Không tìm thấy bút toán trong tenant hiện tại");
+      if (source.status !== "posted" || source.reverses_entry_id) {
+        throw new HttpError(409, "Chỉ có thể lập bút toán đảo cho bút toán gốc đã hạch toán");
+      }
+      const existing = await tx.query(
+        "SELECT id FROM accounting_entries WHERE tenant_id = $1 AND reverses_entry_id = $2",
+        [auth.tenantId, entryId]
+      );
+      if (existing.rowCount) throw new HttpError(409, "Bút toán này đã có bút toán đảo");
+      const lines = await tx.query<{
+        line_number: number;
+        account_code: string;
+        account_name: string;
+        description: string | null;
+        debit: string;
+        credit: string;
+      }>(
+        `SELECT line_number, account_code, account_name, description, debit::text, credit::text
+         FROM accounting_entry_lines
+         WHERE tenant_id = $1 AND accounting_entry_id = $2 ORDER BY line_number`,
+        [auth.tenantId, entryId]
+      );
+      if (lines.rows.length < 2) throw new HttpError(409, "Không thể đảo bút toán thiếu dòng hạch toán");
+
+      const reversalId = randomUUID();
+      const reversalNumber = `REV-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${reversalId.slice(0, 8).toUpperCase()}`;
+      await tx.query(
+        `INSERT INTO accounting_entries
+           (tenant_id, id, reverses_entry_id, entry_number, entry_date, description, currency,
+            status, created_by_membership_id, posted_by_membership_id, posted_at)
+         VALUES ($1, $2, $3, $4, CURRENT_DATE, $5, $6, 'draft', $7, NULL, NULL)`,
+        [
+          auth.tenantId, reversalId, entryId, reversalNumber,
+          `Đảo bút toán ${source.entry_number}`, source.currency, auth.membershipId
+        ]
+      );
+      for (const [index, line] of lines.rows.entries()) {
+        await tx.query(
+          `INSERT INTO accounting_entry_lines
+             (tenant_id, accounting_entry_id, line_number, account_code, account_name,
+              description, debit, credit)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [
+            auth.tenantId, reversalId, index + 1, line.account_code, line.account_name,
+            line.description, line.credit, line.debit
+          ]
+        );
+      }
+      await tx.query(
+        `UPDATE accounting_entries
+         SET status = 'posted', posted_by_membership_id = $3, posted_at = now(), updated_at = now()
+         WHERE tenant_id = $1 AND id = $2 AND status = 'draft'`,
+        [auth.tenantId, reversalId, auth.membershipId]
+      );
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id, details)
+         VALUES ($1, $2, 'accounting_entry.reversed', 'accounting_entry', $3, $4)`,
+        [auth.tenantId, auth.userId, reversalId, JSON.stringify({ reversesEntryId: entryId })]
+      );
+      return { id: reversalId, entryNumber: reversalNumber };
+    }, auth.userId);
+    res.status(201).json({ status: "reversed", ...reversal });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      res.status(409).json({ error: "Bút toán này đã có bút toán đảo" });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.get("/api/ledger/template", authenticate, requireRoles("tenant_admin", "accountant"), async (_req, res, next) => {
+  try {
+    const workbook = await createLedgerTemplate();
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", 'attachment; filename="novabooks-ledger-template.xlsx"');
+    res.send(workbook);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/ledger/import/preview", authenticate, requireRoles("tenant_admin", "accountant"), upload.single("ledger"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const workbook = await parseLedgerUpload(req.file);
+    const entryNumbers = workbook.entries.map((entry) => entry.entryNumber);
+    const duplicates = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const result = await tx.query<{ entry_number: string }>(
+        "SELECT entry_number FROM accounting_entries WHERE entry_number = ANY($1::text[])",
+        [entryNumbers]
+      );
+      return result.rows.map((row) => row.entry_number);
+    }, auth.userId);
+    res.json({
+      entryCount: workbook.entries.length,
+      lineCount: workbook.lineCount,
+      accountCount: workbook.accounts.length,
+      duplicateEntryNumbers: duplicates,
+      canImport: duplicates.length === 0
+    });
+  } catch (error) {
+    if (error instanceof LedgerWorkbookError) {
+      res.status(400).json({ error: error.message, details: error.details });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.post("/api/ledger/import", authenticate, requireRoles("tenant_admin", "accountant"), upload.single("ledger"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const workbook = await parseLedgerUpload(req.file);
+    const result = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const entryNumbers = workbook.entries.map((entry) => entry.entryNumber);
+      const duplicates = await tx.query<{ entry_number: string }>(
+        "SELECT entry_number FROM accounting_entries WHERE entry_number = ANY($1::text[])",
+        [entryNumbers]
+      );
+      if (duplicates.rowCount) {
+        throw new HttpError(409, `Số bút toán đã tồn tại: ${duplicates.rows.map((row) => row.entry_number).join(", ")}`);
+      }
+
+      for (const account of workbook.accounts) {
+        await tx.query(
+          `INSERT INTO ledger_accounts (tenant_id, account_code, account_name)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (tenant_id, account_code)
+           DO UPDATE SET account_name = EXCLUDED.account_name, updated_at = now()`,
+          [auth.tenantId, account.accountCode, account.accountName]
+        );
+      }
+
+      for (const entry of workbook.entries) {
+        const entryId = randomUUID();
+        await tx.query(
+          `INSERT INTO accounting_entries
+             (tenant_id, id, entry_number, entry_date, description, currency, status,
+              created_by_membership_id, posted_by_membership_id, posted_at)
+           VALUES ($1, $2, $3, $4::date, $5, $6, 'draft', $7, NULL, NULL)`,
+          [
+            auth.tenantId, entryId, entry.entryNumber, entry.entryDate,
+            entry.description, entry.currency, auth.membershipId
+          ]
+        );
+        for (const [index, line] of entry.lines.entries()) {
+          await tx.query(
+            `INSERT INTO accounting_entry_lines
+               (tenant_id, accounting_entry_id, line_number, account_code, account_name,
+                description, debit, credit)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [
+              auth.tenantId, entryId, index + 1, line.accountCode, line.accountName,
+              line.description, line.debit, line.credit
+            ]
+          );
+        }
+        await tx.query(
+          `UPDATE accounting_entries
+           SET status = 'posted', posted_by_membership_id = $3, posted_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND id = $2 AND status = 'draft'`,
+          [auth.tenantId, entryId, auth.membershipId]
+        );
+      }
+
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, details)
+         VALUES ($1, $2, 'ledger.imported', 'accounting_entries', $3)`,
+        [auth.tenantId, auth.userId, JSON.stringify({
+          entryCount: workbook.entries.length,
+          lineCount: workbook.lineCount,
+          accountCount: workbook.accounts.length
+        })]
+      );
+      return {
+        entryCount: workbook.entries.length,
+        lineCount: workbook.lineCount,
+        accountCount: workbook.accounts.length
+      };
+    }, auth.userId);
+    res.status(201).json({ status: "imported", ...result });
+  } catch (error) {
+    if (error instanceof LedgerWorkbookError) {
+      res.status(400).json({ error: error.message, details: error.details });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.get("/api/ledger/accounts", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const result = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const accounts = await tx.query(
+        "SELECT account_code, account_name FROM ledger_accounts ORDER BY account_code LIMIT 2000"
+      );
+      const mappings = await tx.query(
+        "SELECT mapping_key, account_code FROM tenant_account_mappings"
+      );
+      return {
+        accounts: accounts.rows,
+        mappings: Object.fromEntries(mappings.rows.map((row) => [row.mapping_key, row.account_code]))
+      };
+    }, auth.userId);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/ledger/mappings", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const input = ledgerMappingSchema.parse(req.body);
+    const mappings = [
+      ["expense", input.expenseAccountCode],
+      ["input_tax", input.inputTaxAccountCode],
+      ["accounts_payable", input.payableAccountCode]
+    ] as const;
+    await withTenantTransaction(auth.tenantId, async (tx) => {
+      const accountCodes = mappings.map(([, code]) => code);
+      const found = await tx.query<{ account_code: string }>(
+        "SELECT account_code FROM ledger_accounts WHERE account_code = ANY($1::text[])",
+        [accountCodes]
+      );
+      const foundCodes = new Set(found.rows.map((row) => row.account_code));
+      const missing = [...new Set(accountCodes)].filter((code) => !foundCodes.has(code));
+      if (missing.length) throw new HttpError(400, `Không tìm thấy mã tài khoản: ${missing.join(", ")}`);
+      for (const [mappingKey, accountCode] of mappings) {
+        await tx.query(
+          `INSERT INTO tenant_account_mappings (tenant_id, mapping_key, account_code)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (tenant_id, mapping_key)
+           DO UPDATE SET account_code = EXCLUDED.account_code, updated_at = now()`,
+          [auth.tenantId, mappingKey, accountCode]
+        );
+      }
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, details)
+         VALUES ($1, $2, 'ledger.account_mappings_updated', 'tenant_account_mappings', $3)`,
+        [auth.tenantId, auth.userId, JSON.stringify(Object.fromEntries(mappings))]
+      );
+    }, auth.userId);
+    res.json({ status: "saved" });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      res.status(409).json({ error: "Cấu hình tài khoản đã thay đổi đồng thời; hãy tải lại và thử lại." });
+      return;
+    }
     next(error);
   }
 });
@@ -462,11 +752,29 @@ app.post("/api/members/:membershipId/remove", authenticate, requireRoles("tenant
 app.get("/api/suppliers", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
   try {
     const auth = (req as AuthenticatedRequest).auth;
-    const suppliers = await withTenantTransaction(auth.tenantId, async (tx) => {
-      const result = await tx.query("SELECT id, code, name, tax_id, email FROM suppliers ORDER BY name LIMIT 500");
-      return result.rows;
+    const options = parseListOptions(req, true);
+    const result = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const count = await tx.query<{ total: string }>(
+        `SELECT count(*)::text AS total FROM suppliers
+         WHERE ($1 = 'all' OR status = $1)
+           AND ($2 = '' OR position(lower($2) in lower(code)) > 0
+             OR position(lower($2) in lower(name)) > 0
+             OR position(lower($2) in lower(COALESCE(tax_id, ''))) > 0)`,
+        [options.status, options.search]
+      );
+      const suppliers = await tx.query(
+        `SELECT id, code, name, tax_id, email, phone, address, status
+         FROM suppliers
+         WHERE ($1 = 'all' OR status = $1)
+           AND ($2 = '' OR position(lower($2) in lower(code)) > 0
+             OR position(lower($2) in lower(name)) > 0
+             OR position(lower($2) in lower(COALESCE(tax_id, ''))) > 0)
+         ORDER BY name, code LIMIT $3 OFFSET $4`,
+        [options.status, options.search, options.pageSize, options.offset]
+      );
+      return { suppliers: suppliers.rows, total: Number(count.rows[0]?.total ?? 0) };
     }, auth.userId);
-    res.json({ suppliers });
+    res.json({ ...result, page: options.page, pageSize: options.pageSize });
   } catch (error) {
     next(error);
   }
@@ -475,11 +783,16 @@ app.get("/api/suppliers", authenticate, requireRoles("tenant_admin", "accountant
 app.post("/api/suppliers", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
   try {
     const auth = (req as AuthenticatedRequest).auth;
-    const input = validateSupplier(req.body);
+    const input = supplierSchema.parse(req.body);
     const supplier = await withTenantTransaction(auth.tenantId, async (tx) => {
       const result = await tx.query(
-        "INSERT INTO suppliers (tenant_id, code, name, tax_id, email) VALUES ($1, $2, $3, $4, $5) RETURNING id, code, name, tax_id, email",
-        [auth.tenantId, input.code, input.name, input.taxId ?? null, input.email ?? null]
+        `INSERT INTO suppliers (tenant_id, code, name, tax_id, email, phone, address)
+         VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7)
+         RETURNING id, code, name, tax_id, email, phone, address, status`,
+        [
+          auth.tenantId, input.code, input.name, input.taxId ?? null,
+          input.email ?? "", input.phone ?? null, input.address ?? null
+        ]
       );
       return result.rows[0];
     }, auth.userId);
@@ -493,17 +806,110 @@ app.post("/api/suppliers", authenticate, requireRoles("tenant_admin", "accountan
   }
 });
 
+app.put("/api/suppliers/:supplierId", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const supplierId = uuidParam(req.params.supplierId);
+    const input = supplierSchema.parse(req.body);
+    const supplier = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const result = await tx.query(
+        `UPDATE suppliers SET code = $3, name = $4, tax_id = $5, email = NULLIF($6, ''),
+           phone = $7, address = $8, updated_at = now()
+         WHERE tenant_id = $1 AND id = $2
+         RETURNING id, code, name, tax_id, email, phone, address, status`,
+        [
+          auth.tenantId, supplierId, input.code, input.name, input.taxId ?? null,
+          input.email ?? "", input.phone ?? null, input.address ?? null
+        ]
+      );
+      if (!result.rows[0]) throw new HttpError(404, "Không tìm thấy nhà cung cấp trong tenant hiện tại");
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id)
+         VALUES ($1, $2, 'supplier.updated', 'supplier', $3)`,
+        [auth.tenantId, auth.userId, supplierId]
+      );
+      return result.rows[0];
+    }, auth.userId);
+    res.json(supplier);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      res.status(409).json({ error: "Mã hoặc mã số thuế nhà cung cấp đã tồn tại" });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.delete("/api/suppliers/:supplierId", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const supplierId = uuidParam(req.params.supplierId);
+    await withTenantTransaction(auth.tenantId, async (tx) => {
+      const result = await tx.query(
+        `UPDATE suppliers SET status = 'archived', updated_at = now()
+         WHERE tenant_id = $1 AND id = $2 AND status = 'active'`,
+        [auth.tenantId, supplierId]
+      );
+      if (!result.rowCount) throw new HttpError(404, "Không tìm thấy nhà cung cấp đang hoạt động");
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id)
+         VALUES ($1, $2, 'supplier.archived', 'supplier', $3)`,
+        [auth.tenantId, auth.userId, supplierId]
+      );
+    }, auth.userId);
+    res.json({ status: "archived" });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/suppliers/:supplierId/restore", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const supplierId = uuidParam(req.params.supplierId);
+    await withTenantTransaction(auth.tenantId, async (tx) => {
+      const result = await tx.query(
+        `UPDATE suppliers SET status = 'active', updated_at = now()
+         WHERE tenant_id = $1 AND id = $2 AND status = 'archived'`,
+        [auth.tenantId, supplierId]
+      );
+      if (!result.rowCount) throw new HttpError(404, "Không tìm thấy nhà cung cấp đã lưu trữ");
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id)
+         VALUES ($1, $2, 'supplier.restored', 'supplier', $3)`,
+        [auth.tenantId, auth.userId, supplierId]
+      );
+    }, auth.userId);
+    res.json({ status: "active" });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/products", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
   try {
     const auth = (req as AuthenticatedRequest).auth;
-    const products = await withTenantTransaction(auth.tenantId, async (tx) => {
-      const result = await tx.query(
-        `SELECT id, code, name, unit, default_unit_price, currency, tax_rate, status
-         FROM products ORDER BY name LIMIT 500`
+    const options = parseListOptions(req, true);
+    const result = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const count = await tx.query<{ total: string }>(
+        `SELECT count(*)::text AS total FROM products
+         WHERE ($1 = 'all' OR status = $1)
+           AND ($2 = '' OR position(lower($2) in lower(code)) > 0
+             OR position(lower($2) in lower(name)) > 0)`,
+        [options.status, options.search]
       );
-      return result.rows;
+      const products = await tx.query(
+        `SELECT id, code, name, unit, default_unit_price, currency, tax_rate, status
+         FROM products
+         WHERE ($1 = 'all' OR status = $1)
+           AND ($2 = '' OR position(lower($2) in lower(code)) > 0
+             OR position(lower($2) in lower(name)) > 0)
+         ORDER BY name, code LIMIT $3 OFFSET $4`,
+        [options.status, options.search, options.pageSize, options.offset]
+      );
+      return { products: products.rows, total: Number(count.rows[0]?.total ?? 0) };
     }, auth.userId);
-    res.json({ products });
+    res.json({ ...result, page: options.page, pageSize: options.pageSize });
   } catch (error) {
     next(error);
   }
@@ -532,6 +938,86 @@ app.post("/api/products", authenticate, requireRoles("tenant_admin", "accountant
       res.status(409).json({ error: "Mã sản phẩm đã tồn tại trong tenant này" });
       return;
     }
+    next(error);
+  }
+});
+
+app.put("/api/products/:productId", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const productId = uuidParam(req.params.productId);
+    const input = productSchema.parse(req.body);
+    const product = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const result = await tx.query(
+        `UPDATE products SET code = $3, name = $4, unit = $5, default_unit_price = $6,
+           currency = $7, tax_rate = $8, updated_at = now()
+         WHERE tenant_id = $1 AND id = $2
+         RETURNING id, code, name, unit, default_unit_price, currency, tax_rate, status`,
+        [
+          auth.tenantId, productId, input.code, input.name, input.unit ?? null,
+          input.defaultUnitPrice ?? null, input.currency, input.taxRate ?? null
+        ]
+      );
+      if (!result.rows[0]) throw new HttpError(404, "Không tìm thấy hàng hóa trong tenant hiện tại");
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id)
+         VALUES ($1, $2, 'product.updated', 'product', $3)`,
+        [auth.tenantId, auth.userId, productId]
+      );
+      return result.rows[0];
+    }, auth.userId);
+    res.json(product);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      res.status(409).json({ error: "Mã hàng hóa đã tồn tại trong tenant này" });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.delete("/api/products/:productId", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const productId = uuidParam(req.params.productId);
+    await withTenantTransaction(auth.tenantId, async (tx) => {
+      const result = await tx.query(
+        `UPDATE products SET status = 'archived', updated_at = now()
+         WHERE tenant_id = $1 AND id = $2 AND status = 'active'`,
+        [auth.tenantId, productId]
+      );
+      if (!result.rowCount) throw new HttpError(404, "Không tìm thấy hàng hóa đang hoạt động");
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id)
+         VALUES ($1, $2, 'product.archived', 'product', $3)`,
+        [auth.tenantId, auth.userId, productId]
+      );
+    }, auth.userId);
+    res.json({ status: "archived" });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/products/:productId/restore", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const productId = uuidParam(req.params.productId);
+    await withTenantTransaction(auth.tenantId, async (tx) => {
+      const result = await tx.query(
+        `UPDATE products SET status = 'active', updated_at = now()
+         WHERE tenant_id = $1 AND id = $2 AND status = 'archived'`,
+        [auth.tenantId, productId]
+      );
+      if (!result.rowCount) throw new HttpError(404, "Không tìm thấy hàng hóa đã lưu trữ");
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id)
+         VALUES ($1, $2, 'product.restored', 'product', $3)`,
+        [auth.tenantId, auth.userId, productId]
+      );
+    }, auth.userId);
+    res.json({ status: "active" });
+  } catch (error) {
     next(error);
   }
 });
@@ -651,21 +1137,44 @@ const errorHandler: ErrorRequestHandler = (error: unknown, _req, res, _next) => 
 };
 app.use(errorHandler);
 
-function validateSupplier(input: unknown): { code: string; name: string; taxId?: string; email?: string } {
-  if (!input || typeof input !== "object") throw new HttpError(400, "Dữ liệu nhà cung cấp không hợp lệ");
-  const value = input as Record<string, unknown>;
-  if (typeof value.code !== "string" || value.code.trim().length < 1 || value.code.length > 64
-    || typeof value.name !== "string" || value.name.trim().length < 2 || value.name.length > 200) {
-    throw new HttpError(400, "Mã và tên nhà cung cấp là bắt buộc");
+function parseListOptions(
+  req: Request,
+  includeStatus = false
+): { page: number; pageSize: number; offset: number; search: string; status: string } {
+  const pageValue = req.query.page === undefined ? "1" : req.query.page;
+  const searchValue = req.query.q === undefined ? "" : req.query.q;
+  const statusValue = req.query.status === undefined ? "active" : req.query.status;
+  if (
+    typeof pageValue !== "string" || !/^[1-9]\d*$/.test(pageValue)
+    || !Number.isSafeInteger(Number(pageValue)) || Number(pageValue) > 1_000_000
+  ) {
+    throw new HttpError(400, "Số trang không hợp lệ");
   }
-  if (value.taxId !== undefined && typeof value.taxId !== "string") throw new HttpError(400, "Mã số thuế không hợp lệ");
-  if (value.email !== undefined && typeof value.email !== "string") throw new HttpError(400, "Email không hợp lệ");
+  if (typeof searchValue !== "string" || searchValue.length > 100) {
+    throw new HttpError(400, "Từ khóa tìm kiếm tối đa 100 ký tự");
+  }
+  if (includeStatus && (
+    typeof statusValue !== "string" || !["active", "archived", "all"].includes(statusValue)
+  )) {
+    throw new HttpError(400, "Bộ lọc trạng thái không hợp lệ");
+  }
+  const page = Number(pageValue);
+  const pageSize = 20;
   return {
-    code: value.code.trim(),
-    name: value.name.trim(),
-    taxId: value.taxId as string | undefined,
-    email: value.email as string | undefined
+    page,
+    pageSize,
+    offset: (page - 1) * pageSize,
+    search: searchValue.trim(),
+    status: includeStatus ? String(statusValue) : "all"
   };
+}
+
+async function parseLedgerUpload(file: Express.Multer.File | undefined) {
+  if (!file) throw new HttpError(400, "Vui lòng chọn file Excel sổ cái.");
+  if (!/\.xlsx$/i.test(file.originalname)) {
+    throw new HttpError(415, "Chỉ hỗ trợ file Excel .xlsx. Hãy lưu workbook dưới định dạng Excel Workbook.");
+  }
+  return parseLedgerWorkbook(file.buffer);
 }
 
 async function receiveTelegramDocument(

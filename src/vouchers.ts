@@ -266,7 +266,12 @@ export async function reviewVoucher(
   auth: AuthContext,
   voucherId: string,
   decision: "approve" | "reject",
-  note?: string
+  note?: string,
+  accountMappingOverrides?: {
+    expenseAccountCode: string;
+    inputTaxAccountCode: string;
+    payableAccountCode: string;
+  }
 ): Promise<{ status: string }> {
   return withTenantTransaction(auth.tenantId, async (tx) => {
     const lock = await tx.query<{
@@ -306,6 +311,49 @@ export async function reviewVoucher(
     if (total <= 0n) throw new HttpError(422, "Tổng tiền chứng từ phải lớn hơn 0");
     if (subtotal + tax !== total) throw new HttpError(422, "Tổng tiền không cân bằng với tiền trước thuế và thuế");
 
+    const mappingKeys = ["expense", "input_tax", "accounts_payable"] as const;
+    const overrideCodes = accountMappingOverrides
+      ? [
+          accountMappingOverrides.expenseAccountCode,
+          accountMappingOverrides.inputTaxAccountCode,
+          accountMappingOverrides.payableAccountCode
+        ]
+      : [];
+    const accountMappings = accountMappingOverrides
+      ? await tx.query<{ mapping_key: string | null; account_code: string; account_name: string }>(
+          "SELECT NULL::text AS mapping_key, account_code, account_name FROM ledger_accounts WHERE account_code = ANY($1::text[])",
+          [overrideCodes]
+        )
+      : await tx.query<{
+          mapping_key: string | null;
+          account_code: string;
+          account_name: string;
+        }>(
+          `SELECT m.mapping_key, a.account_code, a.account_name
+           FROM tenant_account_mappings m
+           JOIN ledger_accounts a
+             ON a.tenant_id = m.tenant_id AND a.account_code = m.account_code`
+        );
+    const mapped = accountMappingOverrides
+      ? new Map(
+          mappingKeys.map((key, index) => {
+            const code = overrideCodes[index];
+            return [key, accountMappings.rows.find((row) => row.account_code === code)];
+          })
+        )
+      : new Map(
+          accountMappings.rows.map((row) => [row.mapping_key ?? "", row])
+        );
+    const expenseAccount = mapped.get("expense");
+    const taxAccount = mapped.get("input_tax");
+    const payableAccount = mapped.get("accounts_payable");
+    if (!expenseAccount || !payableAccount || (tax > 0n && !taxAccount)) {
+      throw new HttpError(
+        422,
+        "Chưa cấu hình tài khoản định khoản. Hãy nhập sổ Excel và cấu hình tài khoản trong mục Sổ sách trước khi duyệt."
+      );
+    }
+
     await tx.query(
       `UPDATE temp_vouchers SET status = 'approved', review_note = $4,
        approved_by_membership_id = $3, approved_at = now(), updated_at = now()
@@ -330,23 +378,23 @@ export async function reviewVoucher(
       await tx.query(
         `INSERT INTO accounting_entry_lines
           (tenant_id, accounting_entry_id, line_number, account_code, account_name, debit)
-         VALUES ($1, $2, $3, 'expense', 'Chi phí/Hàng mua', $4)`,
-        [auth.tenantId, entryId, lineNumber++, voucher.subtotal]
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [auth.tenantId, entryId, lineNumber++, expenseAccount.account_code, expenseAccount.account_name, voucher.subtotal]
       );
     }
     if (tax > 0n) {
       await tx.query(
         `INSERT INTO accounting_entry_lines
           (tenant_id, accounting_entry_id, line_number, account_code, account_name, debit)
-         VALUES ($1, $2, $3, 'input_tax', 'Thuế GTGT đầu vào', $4)`,
-        [auth.tenantId, entryId, lineNumber++, voucher.tax_amount]
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [auth.tenantId, entryId, lineNumber++, taxAccount?.account_code, taxAccount?.account_name, voucher.tax_amount]
       );
     }
     await tx.query(
       `INSERT INTO accounting_entry_lines
         (tenant_id, accounting_entry_id, line_number, account_code, account_name, credit)
-       VALUES ($1, $2, $3, 'accounts_payable', 'Phải trả nhà cung cấp', $4)`,
-      [auth.tenantId, entryId, lineNumber, voucher.total_amount]
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [auth.tenantId, entryId, lineNumber, payableAccount.account_code, payableAccount.account_name, voucher.total_amount]
     );
     await tx.query(
       `UPDATE accounting_entries
@@ -359,7 +407,14 @@ export async function reviewVoucher(
       [auth.tenantId, voucherId]
     );
     await writeAudit(tx, auth, voucherId, "voucher.approved_and_posted", {
-      entryId, entryNumber, note: note ?? null
+      entryId,
+      entryNumber,
+      note: note ?? null,
+      accountMappings: {
+        expense: expenseAccount.account_code,
+        input_tax: tax > 0n ? taxAccount?.account_code : null,
+        accounts_payable: payableAccount.account_code
+      }
     });
     return { status: "posted" };
   }, auth.userId);

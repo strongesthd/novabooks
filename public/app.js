@@ -36,6 +36,7 @@
       if (response.status === 401 && token) logout(false);
       const error = new Error(body.error || `Yêu cầu thất bại (${response.status})`);
       error.memberships = body.memberships;
+      error.details = body.details;
       throw error;
     }
     return body;
@@ -48,6 +49,103 @@
     node.classList.remove("hidden");
     clearTimeout(toast.timer);
     toast.timer = setTimeout(() => node.classList.add("hidden"), 4200);
+  }
+
+  function showFormDialog({
+    title,
+    description = "",
+    fields = [],
+    confirmLabel = "Lưu",
+    confirmClass = "button-primary",
+    cancelLabel = "Hủy"
+  }) {
+    return new Promise((resolve) => {
+      const dialog = document.createElement("dialog");
+      dialog.className = "app-dialog";
+      const form = document.createElement("form");
+      form.className = "app-dialog-form";
+
+      const heading = document.createElement("h2");
+      heading.textContent = title;
+      form.append(heading);
+      if (description) {
+        const help = document.createElement("p");
+        help.className = "app-dialog-description";
+        help.textContent = description;
+        form.append(help);
+      }
+
+      const fieldList = document.createElement("div");
+      fieldList.className = "app-dialog-fields";
+      for (const field of fields) {
+        const label = document.createElement("label");
+        label.className = "app-dialog-field";
+        label.textContent = field.label;
+        let control;
+        if (field.type === "textarea") {
+          control = document.createElement("textarea");
+          control.rows = field.rows || 3;
+        } else if (field.type === "select") {
+          control = document.createElement("select");
+          for (const option of field.options || []) {
+            const item = document.createElement("option");
+            item.value = option.value;
+            item.textContent = option.label;
+            control.append(item);
+          }
+        } else {
+          control = document.createElement("input");
+          control.type = field.type || "text";
+        }
+        control.name = field.name;
+        control.value = field.value ?? "";
+        control.required = Boolean(field.required);
+        control.autocomplete = "off";
+        if (field.minLength) control.minLength = field.minLength;
+        if (field.step) control.step = field.step;
+        if (field.min !== undefined) control.min = field.min;
+        if (field.max !== undefined) control.max = field.max;
+        if (field.placeholder) control.placeholder = field.placeholder;
+        label.append(control);
+        fieldList.append(label);
+      }
+      form.append(fieldList);
+
+      const actions = document.createElement("div");
+      actions.className = "app-dialog-actions";
+      const cancel = document.createElement("button");
+      cancel.className = "button button-secondary";
+      cancel.type = "button";
+      cancel.textContent = cancelLabel;
+      cancel.addEventListener("click", () => dialog.close("cancel"));
+      const submit = document.createElement("button");
+      submit.className = `button ${confirmClass}`;
+      submit.type = "submit";
+      submit.textContent = confirmLabel;
+      actions.append(cancel, submit);
+      form.append(actions);
+      dialog.append(form);
+
+      let result = null;
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!form.reportValidity()) return;
+        result = Object.fromEntries(new FormData(form).entries());
+        dialog.close("submit");
+      });
+      dialog.addEventListener("close", () => {
+        dialog.remove();
+        resolve(result);
+      }, { once: true });
+      document.body.append(dialog);
+      dialog.showModal();
+      fieldList.querySelector("input, select, textarea")?.focus();
+    });
+  }
+
+  function showConfirmDialog(title, description, confirmLabel = "Xác nhận") {
+    return showFormDialog({ title, description, confirmLabel, confirmClass: "button-danger" })
+      .then((result) => result !== null);
   }
 
   function showAuth(message = "") {
@@ -93,7 +191,8 @@
     return ({
       received: "Đã tiếp nhận", extracting: "Đang trích xuất", needs_review: "Chờ duyệt",
       approved: "Đã duyệt", posted: "Đã ghi sổ", rejected: "Đã từ chối",
-      failed: "Cần xử lý", active: "Đang hoạt động", disabled: "Đã tắt", error: "Lỗi kết nối"
+      failed: "Cần xử lý", active: "Đang hoạt động", archived: "Đã lưu trữ",
+      disabled: "Đã tắt", error: "Lỗi kết nối"
     })[status] || status;
   }
 
@@ -169,8 +268,46 @@
     return `<div class="empty-state"><div class="empty-icon">✳</div><strong>${escapeHtml(title)}</strong><br>${escapeHtml(subtitle)}</div>`;
   }
 
+  function pagination(page, pageSize, total) {
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
+    if (pageCount <= 1) return `<div class="list-pagination"><span>${total} bản ghi</span></div>`;
+    return `<div class="list-pagination"><span>${total} bản ghi · trang ${page}/${pageCount}</span><div>
+      <button class="button button-secondary compact" data-list-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>← Trước</button>
+      <button class="button button-secondary compact" data-list-page="${page + 1}" ${page >= pageCount ? "disabled" : ""}>Sau →</button>
+    </div></div>`;
+  }
+
+  function bindPagination(onPage) {
+    content.querySelectorAll("[data-list-page]").forEach((button) => {
+      button.addEventListener("click", () => void onPage(Number(button.dataset.listPage)));
+    });
+  }
+
+  function catalogToolbar(search, status, placeholderSuffix = "") {
+    return `<form class="catalog-toolbar" data-catalog-filter>
+      <input name="q" type="search" maxlength="100" placeholder="Tìm mã, tên${placeholderSuffix}" value="${escapeHtml(search)}">
+      ${status === undefined ? "" : `<select name="status" aria-label="Lọc trạng thái">
+        <option value="active" ${status === "active" ? "selected" : ""}>Đang hoạt động</option>
+        <option value="archived" ${status === "archived" ? "selected" : ""}>Đã lưu trữ</option>
+        <option value="all" ${status === "all" ? "selected" : ""}>Tất cả</option>
+      </select>`}
+      <button class="button button-secondary compact" type="submit">Tìm kiếm</button>
+    </form>`;
+  }
+
+  function bindCatalogFilter(render) {
+    content.querySelector("[data-catalog-filter]")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+      void render(1, String(values.q || ""), String(values.status || "active"));
+    });
+  }
+
   async function renderVouchers() {
-    const result = await api("/api/vouchers");
+    const [result, ledger] = await Promise.all([
+      api("/api/vouchers"),
+      currentUser.role === "staff" ? Promise.resolve({ accounts: [], mappings: {} }) : api("/api/ledger/accounts")
+    ]);
     const items = result.vouchers;
     content.innerHTML = `${heading("Chứng từ", "Kiểm tra kết quả AI và duyệt trước khi ghi sổ.", '<button class="button button-primary" data-action="upload">＋ Tải chứng từ</button>')}
       <div class="toolbar"><input id="voucher-search" type="search" placeholder="Tìm số hóa đơn hoặc trạng thái"><span class="voucher-meta">${items.length} chứng từ gần nhất</span></div>
@@ -186,12 +323,49 @@
     });
     content.querySelectorAll("[data-review]").forEach((button) => button.addEventListener("click", async () => {
       const decision = button.dataset.review;
-      const note = decision === "reject" ? window.prompt("Lý do từ chối (không bắt buộc):") : "";
-      if (decision === "reject" && note === null) return;
+      let note = "";
+      let accountMappings;
+      if (decision === "reject") {
+        const response = await showFormDialog({
+          title: "Từ chối chứng từ",
+          description: "Bạn có thể ghi lý do để người gửi biết cần bổ sung hoặc chỉnh sửa gì.",
+          fields: [{ name: "note", label: "Lý do (không bắt buộc)", type: "textarea" }],
+          confirmLabel: "Từ chối",
+          confirmClass: "button-danger"
+        });
+        if (response === null) return;
+        note = response.note;
+      } else {
+        const defaults = {
+          expense: ledger.mappings.expense,
+          input_tax: ledger.mappings.input_tax,
+          accounts_payable: ledger.mappings.accounts_payable
+        };
+        if (!ledger.accounts.length || !defaults.expense || !defaults.accounts_payable || !defaults.input_tax) {
+          toast("Hãy nhập sổ Excel và cấu hình đủ tài khoản định khoản trong mục Sổ sách trước.", true);
+          return;
+        }
+        const accountOptions = ledger.accounts.map((account) => ({
+          value: account.account_code,
+          label: `${account.account_code} · ${account.account_name}`
+        }));
+        const selected = await showFormDialog({
+          title: "Duyệt và ghi sổ",
+          description: "Xác nhận hoặc thay đổi tài khoản cho riêng chứng từ này. Thay đổi ở đây không làm đổi cấu hình mặc định.",
+          fields: [
+            { name: "expenseAccountCode", label: "Chi phí / hàng mua", type: "select", value: defaults.expense, options: accountOptions },
+            { name: "inputTaxAccountCode", label: "Thuế GTGT đầu vào", type: "select", value: defaults.input_tax, options: accountOptions },
+            { name: "payableAccountCode", label: "Phải trả nhà cung cấp", type: "select", value: defaults.accounts_payable, options: accountOptions }
+          ],
+          confirmLabel: "Duyệt & ghi sổ"
+        });
+        if (selected === null) return;
+        accountMappings = selected;
+      }
       button.disabled = true;
       try {
         await api(`/api/vouchers/${encodeURIComponent(button.dataset.id)}/review`, {
-          method: "POST", body: JSON.stringify({ decision, note: note || undefined })
+          method: "POST", body: JSON.stringify({ decision, note: note || undefined, accountMappings })
         });
         toast(decision === "approve" ? "Đã duyệt và ghi sổ chứng từ." : "Đã từ chối chứng từ.");
         await navigate("vouchers");
@@ -201,7 +375,7 @@
       }
     }));
     content.querySelectorAll("[data-edit-voucher]").forEach((button) => button.addEventListener("click", () => {
-      void editVoucherFromPrompt(items.find((item) => item.id === button.dataset.editVoucher));
+      void editVoucherWithDialog(items.find((item) => item.id === button.dataset.editVoucher));
     }));
     content.querySelectorAll("[data-retry-voucher]").forEach((button) => button.addEventListener("click", async () => {
       button.disabled = true;
@@ -241,24 +415,28 @@
     return `<article class="voucher-card" data-search="${escapeHtml(search)}"><div class="voucher-main"><div class="voucher-title"><span class="document-icon">▤</span><div><h3>${escapeHtml(voucher.invoice_number || `Chứng từ ${String(voucher.id).slice(0, 8)}`)}</h3><p>${escapeHtml(data.supplierName || "Đang nhận diện nhà cung cấp")} · ${escapeHtml(new Date(voucher.created_at).toLocaleString("vi-VN"))}</p></div></div><div>${statusPill(voucher.status)}<div class="voucher-amount">${money(voucher.total_amount, voucher.currency)}<small>Độ tin cậy AI: ${voucher.ai_confidence == null ? "—" : `${Math.round(Number(voucher.ai_confidence) * 100)}%`}</small></div></div></div>${details ? `<div class="voucher-details">${escapeHtml(details)}</div>` : ""}<div class="voucher-footer"><span class="voucher-meta">${voucher.status === "failed" ? "Có thể kiểm tra tệp/cấu hình AI và tải lại." : "Luôn đối chiếu với chứng từ gốc trước khi ghi sổ."}</span>${actions}</div></article>`;
   }
 
-  async function editVoucherFromPrompt(voucher) {
+  async function editVoucherWithDialog(voucher) {
     if (!voucher) return;
     const data = voucher.extracted_data || {};
     const fields = [
-      ["supplierName", "Nhà cung cấp", data.supplierName ?? ""],
-      ["invoiceNumber", "Số hóa đơn", voucher.invoice_number ?? ""],
-      ["invoiceDate", "Ngày hóa đơn (YYYY-MM-DD)", voucher.invoice_date ?? ""],
-      ["currency", "Tiền tệ (mã 3 ký tự)", voucher.currency ?? ""],
-      ["subtotal", "Tiền trước thuế", voucher.subtotal ?? ""],
-      ["taxAmount", "Tiền thuế", voucher.tax_amount ?? ""],
-      ["totalAmount", "Tổng tiền", voucher.total_amount ?? ""]
+      { name: "supplierName", label: "Nhà cung cấp", value: data.supplierName ?? "" },
+      { name: "invoiceNumber", label: "Số hóa đơn", value: voucher.invoice_number ?? "" },
+      { name: "invoiceDate", label: "Ngày hóa đơn", type: "date", value: voucher.invoice_date ?? "" },
+      { name: "currency", label: "Tiền tệ (mã 3 ký tự)", value: voucher.currency ?? "" },
+      { name: "subtotal", label: "Tiền trước thuế", type: "number", step: "0.0001", min: "0", value: voucher.subtotal ?? "" },
+      { name: "taxAmount", label: "Tiền thuế", type: "number", step: "0.0001", min: "0", value: voucher.tax_amount ?? "" },
+      { name: "totalAmount", label: "Tổng tiền", type: "number", step: "0.0001", min: "0", value: voucher.total_amount ?? "" }
     ];
-    const updates = {};
-    for (const [key, label, initial] of fields) {
-      const value = window.prompt(`${label} (để trống để xóa):`, String(initial));
-      if (value === null) return;
-      updates[key] = value.trim() === "" ? null : value.trim();
-    }
+    const values = await showFormDialog({
+      title: "Chỉnh sửa dữ liệu chứng từ",
+      description: "Để trống trường không bắt buộc nếu muốn xóa dữ liệu đó.",
+      fields,
+      confirmLabel: "Lưu thay đổi"
+    });
+    if (values === null) return;
+    const updates = Object.fromEntries(
+      Object.entries(values).map(([key, value]) => [key, value.trim() === "" ? null : value.trim()])
+    );
     try {
       await api(`/api/vouchers/${encodeURIComponent(voucher.id)}`, {
         method: "PATCH",
@@ -294,51 +472,262 @@
     }
   }
 
-  async function renderEntries() {
-    const result = await api("/api/entries");
+  async function renderEntries(page = 1, search = "") {
+    const query = new URLSearchParams({ page: String(page), q: search });
+    const [result, ledger] = await Promise.all([
+      api(`/api/entries?${query}`),
+      api("/api/ledger/accounts")
+    ]);
     const rows = result.entries;
-    content.innerHTML = `${heading("Sổ sách", "Các bút toán đã ghi sổ và được liên kết với chứng từ gốc.")}<section class="panel">${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Số bút toán</th><th>Ngày</th><th>Nội dung</th><th>Phát sinh Nợ</th><th>Trạng thái</th></tr></thead><tbody>${rows.map((entry) => `<tr><td><strong>${escapeHtml(entry.entry_number)}</strong></td><td>${escapeHtml(new Date(entry.entry_date).toLocaleDateString("vi-VN"))}</td><td>${escapeHtml(entry.description)}</td><td>${money(entry.debit_total, entry.currency)}</td><td>${statusPill(entry.status)}</td></tr>`).join("")}</tbody></table></div>` : empty("Chưa có bút toán", "Bút toán xuất hiện sau khi chứng từ được duyệt.")}</section>`;
+    content.innerHTML = `${heading(
+      "Sổ sách",
+      "Nhập sổ Excel, cấu hình tài khoản và tra cứu bút toán. Đã hạch toán thì không sửa/xóa; dùng bút toán đảo để điều chỉnh có kiểm toán.",
+      '<button class="button button-secondary" data-action="download-ledger-template">Tải mẫu Excel</button><button class="button button-secondary" data-action="configure-ledger-accounts">Cấu hình tài khoản</button><button class="button button-primary" data-action="import-ledger">Nhập sổ Excel</button>'
+    )}
+      <section class="panel ledger-mapping-panel"><div class="panel-header"><div><h2>Định khoản hóa đơn mới</h2><p>Tài khoản sử dụng khi duyệt và ghi sổ chứng từ. Có thể cập nhật cấu hình bất kỳ lúc nào.</p></div></div>
+        <div class="ledger-mapping-list">
+          ${[
+            ["expense", "Chi phí / hàng mua"],
+            ["input_tax", "Thuế GTGT đầu vào"],
+            ["accounts_payable", "Phải trả nhà cung cấp"]
+          ].map(([key, label]) => {
+            const code = ledger.mappings[key];
+            const account = ledger.accounts.find((item) => item.account_code === code);
+            return `<div><span>${label}</span><strong>${account ? `${escapeHtml(account.account_code)} · ${escapeHtml(account.account_name)}` : "Chưa cấu hình"}</strong></div>`;
+          }).join("")}
+        </div>
+      </section>
+      <form class="catalog-toolbar" data-entry-filter><input name="q" type="search" maxlength="100" placeholder="Tìm số bút toán hoặc diễn giải" value="${escapeHtml(search)}"><button class="button button-secondary compact" type="submit">Tìm kiếm</button></form>
+      <section class="panel ledger-entry-panel">${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Số bút toán</th><th>Ngày</th><th>Nội dung</th><th>Phát sinh Nợ</th><th>Trạng thái</th><th>Thao tác</th></tr></thead><tbody>${rows.map((entry) => `<tr><td><strong>${escapeHtml(entry.entry_number)}</strong>${entry.reverses_entry_id ? `<br><small>Bút toán đảo · ${escapeHtml(String(entry.reverses_entry_id).slice(0, 8))}</small>` : ""}</td><td>${escapeHtml(new Date(entry.entry_date).toLocaleDateString("vi-VN"))}</td><td>${escapeHtml(entry.description)}</td><td>${money(entry.debit_total, entry.currency)}</td><td>${statusPill(entry.status)}</td><td><div class="table-actions">${entry.status === "posted" && !entry.reverses_entry_id && !entry.reversal_entry_id ? `<button class="button button-secondary compact" data-reverse-entry="${escapeHtml(entry.id)}">Lập bút toán đảo</button>` : entry.reversal_entry_id ? `<span class="muted-text">Đã có bút toán đảo</span>` : "—"}</div></td></tr>`).join("")}</tbody></table></div>` : empty("Chưa có bút toán", search ? "Thử từ khóa khác." : "Nhập sổ Excel lịch sử hoặc duyệt chứng từ để tạo bút toán.")}${pagination(result.page, result.pageSize, result.total)}</section>
+      <input id="ledger-upload" class="hidden" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">`;
     bindCommon();
-  }
-
-  async function renderSuppliers() {
-    const result = await api("/api/suppliers");
-    content.innerHTML = `${heading("Nhà cung cấp", "Danh mục riêng của doanh nghiệp, không chia sẻ với tenant khác.", currentUser.role !== "staff" ? '<button class="button button-primary" data-action="add-supplier">＋ Thêm nhà cung cấp</button>' : "")}
-      <section class="panel">${result.suppliers.length ? `<div class="table-wrap"><table><thead><tr><th>Mã</th><th>Tên nhà cung cấp</th><th>Mã số thuế</th><th>Email</th></tr></thead><tbody>${result.suppliers.map((item) => `<tr><td>${escapeHtml(item.code)}</td><td><strong>${escapeHtml(item.name)}</strong></td><td>${escapeHtml(item.tax_id || "—")}</td><td>${escapeHtml(item.email || "—")}</td></tr>`).join("")}</tbody></table></div>` : empty("Chưa có nhà cung cấp", "Thêm danh mục để quản lý đối tác kế toán.")}</section>`;
-    bindCommon();
-    const action = content.querySelector('[data-action="add-supplier"]');
-    if (action) action.addEventListener("click", () => {
-      const code = window.prompt("Mã nhà cung cấp:");
-      if (!code) return;
-      const name = window.prompt("Tên nhà cung cấp:");
-      if (!name) return;
-      void api("/api/suppliers", { method: "POST", body: JSON.stringify({ code, name }) })
-        .then(() => { toast("Đã thêm nhà cung cấp."); void navigate("suppliers"); })
-        .catch((error) => toast(error.message, true));
+    content.querySelector("[data-entry-filter]").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const values = new FormData(event.currentTarget);
+      void renderEntries(1, String(values.get("q") || ""));
     });
-  }
-
-  async function renderProducts() {
-    const result = await api("/api/products");
-    content.innerHTML = `${heading("Hàng hóa & dịch vụ", "Danh mục riêng của doanh nghiệp dùng khi đối chiếu chứng từ.", '<button class="button button-primary" data-action="add-product">＋ Thêm mặt hàng</button>')}
-      <section class="panel">${result.products.length ? `<div class="table-wrap"><table><thead><tr><th>Mã</th><th>Tên hàng hóa/dịch vụ</th><th>Đơn vị</th><th>Đơn giá</th><th>Thuế suất</th></tr></thead><tbody>${result.products.map((item) => `<tr><td>${escapeHtml(item.code)}</td><td><strong>${escapeHtml(item.name)}</strong></td><td>${escapeHtml(item.unit || "—")}</td><td>${money(item.default_unit_price, item.currency)}</td><td>${item.tax_rate == null ? "—" : `${escapeHtml(item.tax_rate)}%`}</td></tr>`).join("")}</tbody></table></div>` : empty("Danh mục đang trống", "Thêm hàng hóa hoặc dịch vụ để quản lý tập trung.")}</section>`;
-    bindCommon();
-    content.querySelector('[data-action="add-product"]').addEventListener("click", async () => {
-      const code = window.prompt("Mã hàng hóa/dịch vụ:");
-      if (!code) return;
-      const name = window.prompt("Tên hàng hóa/dịch vụ:");
-      if (!name) return;
-      const unit = window.prompt("Đơn vị tính (không bắt buộc):") || undefined;
-      const price = window.prompt("Đơn giá (để trống nếu chưa có):") || undefined;
+    bindPagination((nextPage) => renderEntries(nextPage, search));
+    content.querySelectorAll("[data-reverse-entry]").forEach((button) => button.addEventListener("click", async () => {
+      if (!await showConfirmDialog(
+        "Lập bút toán đảo?",
+        "NovaBooks sẽ tạo bút toán mới với các dòng Nợ/Có đảo ngược vào ngày hiện tại. Bút toán gốc được giữ nguyên và thao tác được ghi nhật ký kiểm toán.",
+        "Lập bút toán đảo"
+      )) return;
       try {
-        await api("/api/products", {
-          method: "POST",
-          body: JSON.stringify({ code, name, unit, defaultUnitPrice: price, currency: currentUser.default_currency || "VND" })
-        });
-        toast("Đã thêm hàng hóa/dịch vụ.");
-        await navigate("products");
+        await api(`/api/entries/${encodeURIComponent(button.dataset.reverseEntry)}/reverse`, { method: "POST" });
+        toast("Đã lập bút toán đảo.");
+        await renderEntries(page, search);
+      } catch (error) { toast(error.message, true); }
+    }));
+    content.querySelector('[data-action="download-ledger-template"]').addEventListener("click", async () => {
+      try {
+        const response = await fetch("/api/ledger/template", { headers: { Authorization: "Bearer " + token } });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(body.error || "Không thể tải mẫu Excel.");
+        }
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "novabooks-ledger-template.xlsx";
+        link.click();
+        URL.revokeObjectURL(url);
       } catch (error) { toast(error.message, true); }
     });
+    content.querySelector('[data-action="configure-ledger-accounts"]').addEventListener("click", async () => {
+      if (!ledger.accounts.length) {
+        toast("Hãy nhập sổ Excel trước để tải danh mục tài khoản.", true);
+        return;
+      }
+      const options = ledger.accounts.map((account) => ({
+        value: account.account_code,
+        label: `${account.account_code} · ${account.account_name}`
+      }));
+      const mappings = await showFormDialog({
+        title: "Cấu hình định khoản",
+        description: "Chọn tài khoản mặc định lấy từ sổ cái đã nhập. Đảm bảo chọn đúng hệ thống tài khoản của doanh nghiệp.",
+        fields: [
+          { name: "expenseAccountCode", label: "Chi phí / hàng mua", type: "select", value: ledger.mappings.expense, options },
+          { name: "inputTaxAccountCode", label: "Thuế GTGT đầu vào", type: "select", value: ledger.mappings.input_tax, options },
+          { name: "payableAccountCode", label: "Phải trả nhà cung cấp", type: "select", value: ledger.mappings.accounts_payable, options }
+        ],
+        confirmLabel: "Lưu cấu hình"
+      });
+      if (!mappings) return;
+      try {
+        await api("/api/ledger/mappings", { method: "PUT", body: JSON.stringify(mappings) });
+        toast("Đã lưu tài khoản định khoản mặc định.");
+        await navigate("entries");
+      } catch (error) { toast(error.message, true); }
+    });
+    const ledgerFile = $("#ledger-upload");
+    content.querySelector('[data-action="import-ledger"]').addEventListener("click", () => ledgerFile.click());
+    ledgerFile.addEventListener("change", async () => {
+      const file = ledgerFile.files?.[0];
+      if (!file) return;
+      const formData = new FormData();
+      formData.append("ledger", file);
+      try {
+        const preview = await api("/api/ledger/import/preview", { method: "POST", body: formData });
+        if (!preview.canImport) {
+          const duplicatePreview = preview.duplicateEntryNumbers.slice(0, 10).join(", ");
+          toast(`Có ${preview.duplicateEntryNumbers.length} số bút toán đã tồn tại: ${duplicatePreview}`, true);
+          return;
+        }
+        const proceed = await showConfirmDialog(
+          "Xác nhận nhập sổ cái",
+          `Sẽ nhập ${preview.entryCount} bút toán, ${preview.lineCount} dòng và ${preview.accountCount} tài khoản. Bút toán nhập sẽ được ghi nhận là đã hạch toán, chỉ nên nhập dữ liệu lịch sử hợp lệ và đã khóa sổ.`,
+          "Nhập dữ liệu"
+        );
+        if (!proceed) return;
+        const result = await api("/api/ledger/import", { method: "POST", body: formData });
+        toast(`Đã nhập ${result.entryCount} bút toán và ${result.accountCount} tài khoản.`);
+        await navigate("entries");
+      } catch (error) {
+        const detail = error.details?.slice(0, 3).join(" · ");
+        toast(detail ? `${error.message} ${detail}` : error.message, true);
+      } finally {
+        ledgerFile.value = "";
+      }
+    });
+  }
+
+  async function renderSuppliers(page = 1, search = "", status = "active") {
+    const query = new URLSearchParams({ page: String(page), q: search, status });
+    const result = await api(`/api/suppliers?${query}`);
+    const rows = result.suppliers;
+    content.innerHTML = `${heading("Nhà cung cấp", "Danh mục riêng của doanh nghiệp; lưu trữ thay vì xóa để giữ nguyên lịch sử chứng từ.", '<button class="button button-primary" data-action="add-supplier">＋ Thêm nhà cung cấp</button>')}
+      ${catalogToolbar(search, status, " hoặc mã số thuế")}
+      <section class="panel">${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Mã</th><th>Tên nhà cung cấp</th><th>Mã số thuế</th><th>Email</th><th>Trạng thái</th><th>Thao tác</th></tr></thead><tbody>${rows.map((item) => `<tr><td>${escapeHtml(item.code)}</td><td><strong>${escapeHtml(item.name)}</strong></td><td>${escapeHtml(item.tax_id || "—")}</td><td>${escapeHtml(item.email || "—")}</td><td>${statusPill(item.status)}</td><td><div class="table-actions">
+        <button class="button button-secondary compact" data-edit-supplier="${escapeHtml(item.id)}">Sửa</button>
+        ${item.status === "active"
+          ? `<button class="button button-danger compact" data-archive-supplier="${escapeHtml(item.id)}">Lưu trữ</button>`
+          : `<button class="button button-secondary compact" data-restore-supplier="${escapeHtml(item.id)}">Khôi phục</button>`}
+      </div></td></tr>`).join("")}</tbody></table></div>` : empty("Không có nhà cung cấp", search ? "Thử từ khóa hoặc bộ lọc khác." : "Thêm danh mục để quản lý đối tác kế toán.")}${pagination(result.page, result.pageSize, result.total)}</section>`;
+    bindCommon();
+    bindCatalogFilter(renderSuppliers);
+    bindPagination((nextPage) => renderSuppliers(nextPage, search, status));
+    const action = content.querySelector('[data-action="add-supplier"]');
+    if (action) action.addEventListener("click", async () => {
+      await editSupplierWithDialog();
+    });
+    content.querySelectorAll("[data-edit-supplier]").forEach((button) => button.addEventListener("click", () => {
+      void editSupplierWithDialog(
+        rows.find((item) => item.id === button.dataset.editSupplier),
+        () => renderSuppliers(page, search, status)
+      );
+    }));
+    content.querySelectorAll("[data-archive-supplier]").forEach((button) => button.addEventListener("click", () => {
+      void setCatalogArchived("suppliers", button.dataset.archiveSupplier, true, () =>
+        renderSuppliers(rows.length === 1 && page > 1 ? page - 1 : page, search, status));
+    }));
+    content.querySelectorAll("[data-restore-supplier]").forEach((button) => button.addEventListener("click", () => {
+      void setCatalogArchived("suppliers", button.dataset.restoreSupplier, false, () =>
+        renderSuppliers(rows.length === 1 && page > 1 ? page - 1 : page, search, status));
+    }));
+  }
+
+  async function renderProducts(page = 1, search = "", status = "active") {
+    const query = new URLSearchParams({ page: String(page), q: search, status });
+    const result = await api(`/api/products?${query}`);
+    const rows = result.products;
+    content.innerHTML = `${heading("Hàng hóa & dịch vụ", "Danh mục doanh nghiệp; lưu trữ thay vì xóa để giữ nguyên lịch sử kế toán.", '<button class="button button-primary" data-action="add-product">＋ Thêm mặt hàng</button>')}
+      ${catalogToolbar(search, status)}
+      <section class="panel">${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Mã</th><th>Tên hàng hóa/dịch vụ</th><th>Đơn vị</th><th>Đơn giá</th><th>Thuế suất</th><th>Trạng thái</th><th>Thao tác</th></tr></thead><tbody>${rows.map((item) => `<tr><td>${escapeHtml(item.code)}</td><td><strong>${escapeHtml(item.name)}</strong></td><td>${escapeHtml(item.unit || "—")}</td><td>${money(item.default_unit_price, item.currency)}</td><td>${item.tax_rate == null ? "—" : `${escapeHtml(item.tax_rate)}%`}</td><td>${statusPill(item.status)}</td><td><div class="table-actions">
+        <button class="button button-secondary compact" data-edit-product="${escapeHtml(item.id)}">Sửa</button>
+        ${item.status === "active"
+          ? `<button class="button button-danger compact" data-archive-product="${escapeHtml(item.id)}">Lưu trữ</button>`
+          : `<button class="button button-secondary compact" data-restore-product="${escapeHtml(item.id)}">Khôi phục</button>`}
+      </div></td></tr>`).join("")}</tbody></table></div>` : empty("Không có hàng hóa/dịch vụ", search ? "Thử từ khóa hoặc bộ lọc khác." : "Thêm hàng hóa hoặc dịch vụ để quản lý tập trung.")}${pagination(result.page, result.pageSize, result.total)}</section>`;
+    bindCommon();
+    bindCatalogFilter(renderProducts);
+    bindPagination((nextPage) => renderProducts(nextPage, search, status));
+    content.querySelector('[data-action="add-product"]').addEventListener("click", async () => {
+      await editProductWithDialog();
+    });
+    content.querySelectorAll("[data-edit-product]").forEach((button) => button.addEventListener("click", () => {
+      void editProductWithDialog(
+        rows.find((item) => item.id === button.dataset.editProduct),
+        () => renderProducts(page, search, status)
+      );
+    }));
+    content.querySelectorAll("[data-archive-product]").forEach((button) => button.addEventListener("click", () => {
+      void setCatalogArchived("products", button.dataset.archiveProduct, true, () =>
+        renderProducts(rows.length === 1 && page > 1 ? page - 1 : page, search, status));
+    }));
+    content.querySelectorAll("[data-restore-product]").forEach((button) => button.addEventListener("click", () => {
+      void setCatalogArchived("products", button.dataset.restoreProduct, false, () =>
+        renderProducts(rows.length === 1 && page > 1 ? page - 1 : page, search, status));
+    }));
+  }
+
+  async function editSupplierWithDialog(supplier, refresh = () => renderSuppliers()) {
+    const values = await showFormDialog({
+      title: supplier ? "Sửa nhà cung cấp" : "Thêm nhà cung cấp",
+      fields: [
+        { name: "code", label: "Mã nhà cung cấp", value: supplier?.code, required: true },
+        { name: "name", label: "Tên nhà cung cấp", value: supplier?.name, required: true, minLength: 2 },
+        { name: "taxId", label: "Mã số thuế", value: supplier?.tax_id },
+        { name: "email", label: "Email", type: "email", value: supplier?.email },
+        { name: "phone", label: "Số điện thoại", value: supplier?.phone },
+        { name: "address", label: "Địa chỉ", value: supplier?.address }
+      ],
+      confirmLabel: supplier ? "Lưu thay đổi" : "Thêm nhà cung cấp"
+    });
+    if (values === null) return;
+    const payload = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value.trim() || null]));
+    try {
+      await api(supplier ? `/api/suppliers/${encodeURIComponent(supplier.id)}` : "/api/suppliers", {
+        method: supplier ? "PUT" : "POST", body: JSON.stringify(payload)
+      });
+      toast(supplier ? "Đã cập nhật nhà cung cấp." : "Đã thêm nhà cung cấp.");
+      await refresh();
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function editProductWithDialog(product, refresh = () => renderProducts()) {
+    const values = await showFormDialog({
+      title: product ? "Sửa hàng hóa/dịch vụ" : "Thêm hàng hóa/dịch vụ",
+      fields: [
+        { name: "code", label: "Mã hàng hóa/dịch vụ", value: product?.code, required: true },
+        { name: "name", label: "Tên hàng hóa/dịch vụ", value: product?.name, required: true, minLength: 2 },
+        { name: "unit", label: "Đơn vị tính", value: product?.unit },
+        { name: "defaultUnitPrice", label: "Đơn giá", type: "number", min: "0", step: "0.0001", value: product?.default_unit_price },
+        { name: "taxRate", label: "Thuế suất (%)", type: "number", min: "0", max: "100", step: "0.01", value: product?.tax_rate }
+      ],
+      confirmLabel: product ? "Lưu thay đổi" : "Thêm mặt hàng"
+    });
+    if (values === null) return;
+    const payload = {
+      code: values.code.trim(),
+      name: values.name.trim(),
+      unit: values.unit.trim() || null,
+      defaultUnitPrice: values.defaultUnitPrice.trim() || null,
+      taxRate: values.taxRate.trim() === "" ? null : Number(values.taxRate),
+      currency: product?.currency || currentUser.default_currency || "VND"
+    };
+    try {
+      await api(product ? `/api/products/${encodeURIComponent(product.id)}` : "/api/products", {
+        method: product ? "PUT" : "POST", body: JSON.stringify(payload)
+      });
+      toast(product ? "Đã cập nhật hàng hóa/dịch vụ." : "Đã thêm hàng hóa/dịch vụ.");
+      await refresh();
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function setCatalogArchived(resource, id, archive, refresh) {
+    if (archive && !await showConfirmDialog(
+      "Lưu trữ mục này?",
+      "Mục sẽ không còn xuất hiện trong danh sách đang hoạt động. Lịch sử chứng từ và bút toán được giữ nguyên; bạn có thể khôi phục sau.",
+      "Lưu trữ"
+    )) return;
+    try {
+      await api(`/api/${resource}/${encodeURIComponent(id)}${archive ? "" : "/restore"}`, {
+        method: archive ? "DELETE" : "POST"
+      });
+      toast(archive ? "Đã lưu trữ." : "Đã khôi phục.");
+      await refresh();
+    } catch (error) { toast(error.message, true); }
   }
 
   async function renderChannels() {
@@ -384,7 +773,7 @@
       }
     });
     content.querySelectorAll("[data-disable-channel]").forEach((button) => button.addEventListener("click", async () => {
-      if (!window.confirm("Tắt kênh này? Kênh sẽ không nhận webhook mới.")) return;
+      if (!await showConfirmDialog("Tắt kênh?", "Kênh sẽ không nhận webhook mới.", "Tắt kênh")) return;
       try {
         await api(`/api/channels/${encodeURIComponent(button.dataset.disableChannel)}/disable`, { method: "POST" });
         toast("Đã tắt kênh.");
@@ -407,18 +796,32 @@
       ${result.members.map((member) => `<div class="member-row"><div class="channel-info"><span class="user-avatar">${escapeHtml(initials(member.full_name))}</span><div><strong>${escapeHtml(member.full_name)}</strong><small>${escapeHtml(member.email)}</small></div></div><div>${escapeHtml(roleLabel(member.role))} · ${escapeHtml(member.status)}</div>${member.user_id !== currentUser.id ? `<button class="button button-danger compact" data-remove-member="${escapeHtml(member.id)}">Gỡ</button>` : ""}</div>`).join("")}</section>`;
     bindCommon();
     content.querySelector('[data-action="add-member"]').addEventListener("click", async () => {
-      const email = window.prompt("Email của người đã đăng ký NovaBooks:");
-      if (!email) return;
-      const role = window.prompt("Vai trò: accountant hoặc staff", "accountant");
-      if (!["accountant", "staff"].includes(role)) return toast("Vai trò không hợp lệ.", true);
+      const values = await showFormDialog({
+        title: "Thêm thành viên",
+        description: "Người được thêm cần có tài khoản NovaBooks đã đăng ký.",
+        fields: [
+          { name: "email", label: "Email", type: "email", required: true },
+          {
+            name: "role",
+            label: "Vai trò",
+            type: "select",
+            options: [
+              { value: "accountant", label: "Kế toán viên" },
+              { value: "staff", label: "Nhân viên gửi chứng từ" }
+            ]
+          }
+        ],
+        confirmLabel: "Thêm thành viên"
+      });
+      if (!values) return;
       try {
-        await api("/api/members", { method: "POST", body: JSON.stringify({ email, role }) });
+        await api("/api/members", { method: "POST", body: JSON.stringify(values) });
         toast("Đã thêm thành viên.");
         await navigate("members");
       } catch (error) { toast(error.message, true); }
     });
     content.querySelectorAll("[data-remove-member]").forEach((button) => button.addEventListener("click", async () => {
-      if (!window.confirm("Gỡ thành viên này khỏi doanh nghiệp?")) return;
+      if (!await showConfirmDialog("Gỡ thành viên?", "Người này sẽ mất quyền truy cập vào doanh nghiệp.", "Gỡ thành viên")) return;
       try {
         await api(`/api/members/${encodeURIComponent(button.dataset.removeMember)}/remove`, { method: "POST" });
         toast("Đã gỡ thành viên.");
@@ -502,11 +905,23 @@
         result = await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
       } catch (error) {
         if (error.memberships?.length) {
-          const picked = window.prompt(
-            `Tài khoản thuộc nhiều doanh nghiệp. Nhập mã tenant cần dùng:\n${error.memberships.map((item) => item.tenantId).join("\n")}`
-          );
-          if (!picked) throw error;
-          result = await api(endpoint, { method: "POST", body: JSON.stringify({ ...payload, tenantId: picked.trim() }) });
+          const choice = await showFormDialog({
+            title: "Chọn doanh nghiệp",
+            description: "Tài khoản thuộc nhiều doanh nghiệp. Chọn không gian làm việc cần đăng nhập.",
+            fields: [{
+              name: "tenantId",
+              label: "Doanh nghiệp",
+              type: "select",
+              required: true,
+              options: error.memberships.map((item) => ({
+                value: item.tenantId,
+                label: item.tenantName || item.tenantId
+              }))
+            }],
+            confirmLabel: "Tiếp tục"
+          });
+          if (!choice) throw error;
+          result = await api(endpoint, { method: "POST", body: JSON.stringify({ ...payload, tenantId: choice.tenantId }) });
         } else {
           throw error;
         }

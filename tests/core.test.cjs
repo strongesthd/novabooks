@@ -8,7 +8,9 @@ const assert = require("node:assert/strict");
 const { validateDocument } = require("../dist/storage.js");
 const { encryptJson, decryptJson, hashWebhookKey, constantTimeEqual } = require("../dist/crypto.js");
 const { extractedInvoiceSchema } = require("../dist/gemini.js");
-const { registerSchema, productSchema } = require("../dist/validation.js");
+const { parseLedgerWorkbook, LedgerWorkbookError } = require("../dist/ledger.js");
+const ExcelJS = require("exceljs");
+const { registerSchema, productSchema, supplierSchema } = require("../dist/validation.js");
 
 test("validates document bytes against declared media type", () => {
   const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
@@ -71,4 +73,45 @@ test("validates tenant registration and tenant-owned product fields", () => {
     tenantSlug: "x"
   }).success, false);
   assert.equal(productSchema.safeParse({ code: "SKU1", name: "Dịch vụ kế toán" }).success, true);
+  assert.equal(productSchema.safeParse({
+    code: "SKU1", name: "Dịch vụ kế toán", defaultUnitPrice: null, taxRate: null
+  }).success, true);
+  assert.equal(supplierSchema.safeParse({
+    code: "SUP1", name: "Nhà cung cấp", taxId: null, email: null
+  }).success, true);
+  assert.equal(supplierSchema.safeParse({
+    code: "SUP1", name: "Nhà cung cấp", email: "not-an-email"
+  }).success, false);
+});
+
+test("parses balanced multi-line ledger entries and extracts tenant account catalog", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("So cai");
+  sheet.addRow(["Số bút toán", "Ngày hạch toán", "Diễn giải", "Tiền tệ", "Mã tài khoản", "Tên tài khoản", "Nợ", "Có"]);
+  sheet.addRow(["CT-001", "2026-10-30", "Mua hàng", "VND", "156", "Hàng hóa", 100000, 0]);
+  sheet.addRow(["CT-001", "2026-10-30", "Mua hàng", "VND", "331", "Phải trả", 0, 100000]);
+  const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+
+  const parsed = await parseLedgerWorkbook(buffer);
+  assert.equal(parsed.entries.length, 1);
+  assert.equal(parsed.entries[0].lines.length, 2);
+  assert.deepEqual(parsed.accounts, [
+    { accountCode: "156", accountName: "Hàng hóa" },
+    { accountCode: "331", accountName: "Phải trả" }
+  ]);
+});
+
+test("rejects unbalanced entries and account codes with conflicting names", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("So cai");
+  sheet.addRow(["entry_number", "entry_date", "description", "account_code", "account_name", "debit", "credit"]);
+  sheet.addRow(["CT-001", "30/10/2026", "Mua hàng", "156", "Hàng hóa", 100, 0]);
+  sheet.addRow(["CT-001", "30/10/2026", "Mua hàng", "331", "Phải trả", 0, 90]);
+  const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+
+  await assert.rejects(parseLedgerWorkbook(buffer), (error) => {
+    assert.ok(error instanceof LedgerWorkbookError);
+    assert.ok(error.details.some((detail) => detail.includes("tổng Nợ phải bằng tổng Có")));
+    return true;
+  });
 });

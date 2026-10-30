@@ -31,7 +31,12 @@ export const channelSchema = z.discriminatedUnion("provider", [
 
 export const reviewSchema = z.object({
   decision: z.enum(["approve", "reject"]),
-  note: z.string().trim().max(2000).optional()
+  note: z.string().trim().max(2000).optional(),
+  accountMappings: z.object({
+    expenseAccountCode: z.string().trim().min(1).max(64),
+    inputTaxAccountCode: z.string().trim().min(1).max(64),
+    payableAccountCode: z.string().trim().min(1).max(64)
+  }).optional()
 });
 
 export const voucherEditSchema = z.object({
@@ -52,8 +57,23 @@ export const inviteSchema = z.object({
 export const productSchema = z.object({
   code: z.string().trim().min(1).max(64),
   name: z.string().trim().min(2).max(200),
-  unit: z.string().trim().max(40).optional(),
-  defaultUnitPrice: z.string().regex(/^\d+(?:\.\d{1,4})?$/).optional(),
+  unit: z.string().trim().max(40).nullable().optional(),
+  defaultUnitPrice: z.string().regex(/^\d+(?:\.\d{1,4})?$/).nullable().optional(),
   currency: z.string().regex(/^[A-Z]{3}$/).default("VND"),
-  taxRate: z.number().min(0).max(100).optional()
+  taxRate: z.number().min(0).max(100).nullable().optional()
+});
+
+export const supplierSchema = z.object({
+  code: z.string().trim().min(1).max(64),
+  name: z.string().trim().min(2).max(200),
+  taxId: z.string().trim().max(32).nullable().optional(),
+  email: z.union([z.email().max(254), z.literal("")]).nullable().optional(),
+  phone: z.string().trim().max(40).nullable().optional(),
+  address: z.string().trim().max(500).nullable().optional()
+});
+
+export const ledgerMappingSchema = z.object({
+  expenseAccountCode: z.string().trim().min(1).max(64),
+  inputTaxAccountCode: z.string().trim().min(1).max(64),
+  payableAccountCode: z.string().trim().min(1).max(64)
 });
