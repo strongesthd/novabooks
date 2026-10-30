@@ -1,0 +1,231 @@
+name: Deploy NovaBooks production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: novabooks-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify build and dependencies
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          node --check public/app.js
+          npm audit --audit-level=moderate
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: novabooks-production
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Validate deploy secrets
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          VPS_FINGERPRINT: ${{ secrets.VPS_FINGERPRINT }}
+          LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
+        run: |
+          set -euo pipefail
+          test -n "$VPS_HOST" || { echo 'Missing novabooks-production secret: VPS_HOST'; exit 1; }
+          test -n "$VPS_USER" || { echo 'Missing novabooks-production secret: VPS_USER'; exit 1; }
+          test -n "$VPS_SSH_KEY" || { echo 'Missing novabooks-production secret: VPS_SSH_KEY'; exit 1; }
+          test -n "$VPS_SSH_PORT" || { echo 'Missing novabooks-production secret: VPS_SSH_PORT'; exit 1; }
+          test -n "$VPS_FINGERPRINT" || { echo 'Missing novabooks-production secret: VPS_FINGERPRINT'; exit 1; }
+          test -n "$LETSENCRYPT_EMAIL" || { echo 'Missing novabooks-production secret: LETSENCRYPT_EMAIL'; exit 1; }
+
+      - name: Package source
+        run: |
+          set -euo pipefail
+          tar \
+            --exclude='./.git' \
+            --exclude='./.github' \
+            --exclude='./.ai' \
+            --exclude='./node_modules' \
+            --exclude='./dist' \
+            --exclude='./.env' \
+            --exclude='./data' \
+            --exclude='./coverage' \
+            -czf /tmp/novabooks-deploy.tgz .
+          mv /tmp/novabooks-deploy.tgz .
+          ls -lh novabooks-deploy.tgz
+
+      - name: Upload release package
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT }}
+          fingerprint: ${{ secrets.VPS_FINGERPRINT }}
+          source: novabooks-deploy.tgz
+          target: /tmp/novabooks-upload-${{ github.run_id }}
+          rm: true
+          overwrite: true
+          timeout: 120s
+          command_timeout: 10m
+
+      - name: Deploy and verify
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT }}
+          fingerprint: ${{ secrets.VPS_FINGERPRINT }}
+          envs: RUN_ID,RUN_ATTEMPT,LETSENCRYPT_EMAIL
+          script_stop: true
+          command_timeout: 30m
+          script: |
+            set -Eeuo pipefail
+
+            APP_DIR=/home/app/novabooks
+            RELEASE_DIR="$APP_DIR/releases/${RUN_ID}-${RUN_ATTEMPT}"
+            UPLOAD_DIR="/tmp/novabooks-upload-${RUN_ID}"
+            PACKAGE="$UPLOAD_DIR/novabooks-deploy.tgz"
+            if [ ! -f "$PACKAGE" ]; then
+              PACKAGE="$UPLOAD_DIR/novabooks-deploy.tgz/novabooks-deploy.tgz"
+            fi
+            test -f "$PACKAGE"
+            test -f "$APP_DIR/.env" || { echo "Missing required runtime file: $APP_DIR/.env"; exit 1; }
+
+            mkdir -p "$APP_DIR/releases"
+            mkdir "$RELEASE_DIR"
+            tar -xzf "$PACKAGE" -C "$RELEASE_DIR"
+
+            COMPOSE_FILE="$RELEASE_DIR/docker-compose.prod.yml"
+            docker compose --project-name novabooks --env-file "$APP_DIR/.env" -f "$COMPOSE_FILE" config --quiet
+            docker compose --project-name novabooks --env-file "$APP_DIR/.env" -f "$COMPOSE_FILE" up -d postgres
+
+            for attempt in $(seq 1 30); do
+              if docker compose --project-name novabooks --env-file "$APP_DIR/.env" -f "$COMPOSE_FILE" exec -T postgres \
+                pg_isready -U novabooks_admin -d novabooks >/dev/null 2>&1; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                docker compose --project-name novabooks --env-file "$APP_DIR/.env" -f "$COMPOSE_FILE" logs --tail 100 postgres
+                exit 1
+              fi
+              sleep 2
+            done
+
+            docker compose --project-name novabooks --env-file "$APP_DIR/.env" -f "$COMPOSE_FILE" run --rm migrate
+            docker compose --project-name novabooks --env-file "$APP_DIR/.env" -f "$COMPOSE_FILE" up -d --build --force-recreate app
+
+            READY=0
+            for attempt in $(seq 1 40); do
+              if curl --fail --silent --show-error --max-time 10 http://127.0.0.1:3015/health >/dev/null; then
+                READY=1
+                break
+              fi
+              sleep 3
+            done
+            if [ "$READY" -ne 1 ]; then
+              docker compose --project-name novabooks --env-file "$APP_DIR/.env" -f "$COMPOSE_FILE" ps
+              docker compose --project-name novabooks --env-file "$APP_DIR/.env" -f "$COMPOSE_FILE" logs --tail 100 app migrate postgres
+              exit 1
+            fi
+
+            NGINX_SITE=/etc/nginx/sites-available/novabooks.novatechhp.vn
+            test -d /etc/nginx/sites-available || { echo 'Nginx sites-available is missing'; exit 1; }
+            test -d /etc/nginx/sites-enabled || { echo 'Nginx sites-enabled is missing'; exit 1; }
+            NGINX_LINK=/etc/nginx/sites-enabled/novabooks.novatechhp.vn
+            NGINX_BACKUP=$(mktemp "$APP_DIR/.nginx-novabooks.XXXXXX")
+            HAD_NGINX_SITE=0
+            HAD_NGINX_LINK=0
+            if [ -f "$NGINX_SITE" ]; then
+              sudo -n cp "$NGINX_SITE" "$NGINX_BACKUP"
+              HAD_NGINX_SITE=1
+            fi
+            if [ -L "$NGINX_LINK" ]; then
+              HAD_NGINX_LINK=1
+            fi
+            restore_nginx() {
+              if [ "$HAD_NGINX_SITE" -eq 1 ]; then
+                sudo -n install -m 644 "$NGINX_BACKUP" "$NGINX_SITE"
+              else
+                sudo -n rm -f "$NGINX_SITE"
+              fi
+              if [ "$HAD_NGINX_LINK" -eq 1 ]; then
+                sudo -n ln -sfn "$NGINX_SITE" "$NGINX_LINK"
+              else
+                sudo -n rm -f "$NGINX_LINK"
+              fi
+              sudo -n nginx -t && sudo -n systemctl reload nginx || true
+              rm -f "$NGINX_BACKUP"
+            }
+
+            if [ ! -f /etc/letsencrypt/live/novabooks.novatechhp.vn/fullchain.pem ] \
+              || [ ! -f /etc/letsencrypt/live/novabooks.novatechhp.vn/privkey.pem ]; then
+              sudo -n install -m 644 "$RELEASE_DIR/deploy/nginx-novabooks-bootstrap.conf" "$NGINX_SITE"
+              sudo -n ln -sfn "$NGINX_SITE" "$NGINX_LINK"
+              if ! sudo -n nginx -t || ! sudo -n systemctl reload nginx; then
+                restore_nginx
+                exit 1
+              fi
+              if ! sudo -n certbot certonly --webroot --webroot-path /var/www/certbot \
+                --non-interactive --agree-tos --email "$LETSENCRYPT_EMAIL" \
+                -d novabooks.novatechhp.vn; then
+                restore_nginx
+                exit 1
+              fi
+            fi
+
+            sudo -n install -m 644 "$RELEASE_DIR/deploy/nginx-novabooks.conf" "$NGINX_SITE"
+            sudo -n ln -sfn "$NGINX_SITE" "$NGINX_LINK"
+            if ! sudo -n nginx -t || ! sudo -n systemctl reload nginx; then
+              restore_nginx
+              exit 1
+            fi
+
+            VERIFY_BODY=$(mktemp "$APP_DIR/.novabooks-dashboard.XXXXXX")
+            if ! curl --noproxy '*' --fail --silent --show-error --max-time 15 \
+              --resolve novabooks.novatechhp.vn:443:127.0.0.1 \
+              --output "$VERIFY_BODY" https://novabooks.novatechhp.vn/ \
+              || ! grep -q 'NovaBooks' "$VERIFY_BODY"; then
+              rm -f "$VERIFY_BODY"
+              restore_nginx
+              exit 1
+            fi
+            rm -f "$VERIFY_BODY"
+            if ! curl --noproxy '*' --fail --silent --show-error --max-time 15 \
+              --resolve novabooks.novatechhp.vn:443:127.0.0.1 \
+              https://novabooks.novatechhp.vn/api/health | grep -q '"status":"ok"'; then
+              restore_nginx
+              exit 1
+            fi
+
+            sudo -n mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+            sudo -n install -m 755 "$RELEASE_DIR/deploy/certbot-reload-nginx.sh" \
+              /etc/letsencrypt/renewal-hooks/deploy/novabooks-reload-nginx.sh
+            rm -f "$NGINX_BACKUP"
+            rm -rf "$UPLOAD_DIR"
+            echo 'NovaBooks deployment complete'

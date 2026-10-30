@@ -1,0 +1,9 @@
+.git
+.github
+.ai
+node_modules
+dist
+coverage
+.env
+data
+npm-debug.log*

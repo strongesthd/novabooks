@@ -1,0 +1,85 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:?Set DB_DATABASE in the server .env}
+      POSTGRES_USER: ${DB_ADMIN_USER:-novabooks_admin}
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?Set DB_ADMIN_PASSWORD in the server .env}
+      NOVABOOKS_APP_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the server .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/bootstrap/00-create-runtime-role.sh:/docker-entrypoint-initdb.d/00-create-runtime-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [novabooks]
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    restart: "no"
+    command: ["npm", "run", "db:migrate"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${DB_ADMIN_USER:-novabooks_admin}:${DB_ADMIN_PASSWORD}@postgres:5432/${DB_DATABASE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [novabooks]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${API_PORT:-3015}:3000"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_URL: postgresql://novabooks:${DB_PASSWORD}@postgres:5432/${DB_DATABASE}
+      DB_SSL: "false"
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the server .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in the server .env}
+      APP_BASE_URL: https://novabooks.novatechhp.vn
+      UPLOAD_DIR: /app/data/uploads
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-12}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      TELEGRAM_BOT_API_BASE_URL: https://api.telegram.org
+      ZALO_API_BASE_URL: https://openapi.zalo.me
+      TTS_API_KEY: ${TTS_API_KEY:-}
+      TTS_VOICE_ID: ${TTS_VOICE_ID:-}
+      DAILY_REPORT_CRON: ${DAILY_REPORT_CRON:-0 18 * * *}
+    volumes:
+      - upload_data:/app/data/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks: [novabooks]
+
+volumes:
+  postgres_data:
+  upload_data:
+
+networks:
+  novabooks:
+    driver: bridge

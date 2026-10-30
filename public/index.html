@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f7fb">
+    <title>NovaBooks — Sổ sách thông minh</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div id="app">
+      <section id="auth-view" class="auth-shell">
+        <div class="auth-aside">
+          <a class="brand brand-light" href="/"><span class="brand-mark">N</span><span>NovaBooks</span></a>
+          <div class="auth-promise">
+            <span class="eyebrow">KẾ TOÁN ĐƯỢC TỰ ĐỘNG HÓA</span>
+            <h1>Chứng từ vào.<br><em>Sổ sách rõ ràng.</em></h1>
+            <p>Một nơi an toàn để tiếp nhận, kiểm tra và ghi nhận chứng từ của doanh nghiệp bạn.</p>
+            <div class="promise-points">
+              <span><i>✓</i> AI hỗ trợ, con người quyết định</span>
+              <span><i>✓</i> Không gian dữ liệu riêng cho từng công ty</span>
+              <span><i>✓</i> Báo cáo gọn gàng mỗi ngày</span>
+            </div>
+          </div>
+          <div class="aside-foot">NovaBooks · Sổ sách vững vàng, vận hành nhẹ nhàng</div>
+        </div>
+        <div class="auth-main">
+          <div class="auth-card">
+            <span class="mobile-brand brand"><span class="brand-mark">N</span><span>NovaBooks</span></span>
+            <div id="auth-heading">
+              <span class="eyebrow">CHÀO MỪNG TRỞ LẠI</span>
+              <h2>Đăng nhập</h2>
+              <p>Truy cập không gian kế toán doanh nghiệp của bạn.</p>
+            </div>
+            <form id="auth-form">
+              <label>Email doanh nghiệp<input id="auth-email" type="email" autocomplete="email" required placeholder="ban@congty.vn"></label>
+              <label>Mật khẩu<input id="auth-password" type="password" autocomplete="current-password" minlength="12" required placeholder="Tối thiểu 12 ký tự"></label>
+              <div id="register-fields" class="hidden">
+                <label>Họ và tên<input id="auth-name" autocomplete="name" placeholder="Nguyễn Văn An"></label>
+                <label>Tên doanh nghiệp<input id="company-name" autocomplete="organization" placeholder="Công ty của bạn"></label>
+                <label>Mã định danh tenant<input id="tenant-slug" autocomplete="off" placeholder="cong-ty-cua-ban"></label>
+              </div>
+              <div id="auth-error" class="notice error hidden" role="alert"></div>
+              <button id="auth-submit" class="button button-primary button-wide" type="submit">Đăng nhập <span>→</span></button>
+            </form>
+            <p class="auth-switch"><span id="auth-switch-label">Chưa có tài khoản?</span> <button id="auth-switch" type="button">Tạo doanh nghiệp</button></p>
+            <p class="auth-legal">Bằng việc tiếp tục, bạn đồng ý sử dụng NovaBooks theo chính sách bảo mật và điều khoản dịch vụ.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="app-view" class="app-shell hidden">
+        <aside class="sidebar">
+          <a class="brand" href="#"><span class="brand-mark">N</span><span>NovaBooks</span></a>
+          <div class="tenant-switcher"><span class="tenant-avatar">N</span><span><small>KHÔNG GIAN LÀM VIỆC</small><strong id="tenant-name">Doanh nghiệp</strong></span><span class="chevron">⌄</span></div>
+          <nav id="main-nav" class="main-nav" aria-label="Điều hướng chính">
+            <span class="nav-caption">TỔNG QUAN</span>
+            <button data-page="overview" class="nav-item active"><span class="nav-icon">◫</span>Tổng quan</button>
+            <button data-page="vouchers" class="nav-item"><span class="nav-icon">▤</span>Chứng từ <span id="pending-badge" class="nav-badge hidden">0</span></button>
+            <button data-page="entries" class="nav-item"><span class="nav-icon">↗</span>Sổ sách</button>
+            <button data-page="suppliers" class="nav-item"><span class="nav-icon">◇</span>Nhà cung cấp</button>
+            <button data-page="products" class="nav-item"><span class="nav-icon">▦</span>Hàng hóa</button>
+            <span class="nav-caption nav-caption-spaced">QUẢN LÝ</span>
+            <button data-page="reports" class="nav-item"><span class="nav-icon">▥</span>Báo cáo</button>
+            <button data-page="channels" class="nav-item admin-only"><span class="nav-icon">⌁</span>Kết nối kênh</button>
+            <button data-page="members" class="nav-item admin-only"><span class="nav-icon">♧</span>Thành viên</button>
+          </nav>
+          <div class="sidebar-bottom">
+            <div class="security-note"><span class="security-icon">✳</span><div><strong>Dữ liệu luôn riêng tư</strong><small>Không gian tách biệt cho doanh nghiệp bạn.</small></div></div>
+            <button id="logout" class="user-menu"><span class="user-avatar">A</span><span><strong id="user-name">Tài khoản</strong><small id="user-role">Thành viên</small></span><span class="logout-icon">↪</span></button>
+          </div>
+        </aside>
+        <main class="main-content">
+          <header class="topbar">
+            <div class="breadcrumbs">Không gian làm việc <span>/</span> <strong id="page-title">Tổng quan</strong></div>
+            <div class="topbar-right"><span class="today-date" id="today-date"></span><span class="online-dot"></span><span>Đang hoạt động</span><span class="top-avatar" id="top-avatar">A</span></div>
+          </header>
+          <div id="page-content" class="page-content"></div>
+        </main>
+      </section>
+      <div id="toast" class="toast hidden" role="status"></div>
+    </div>
+  </body>
+</html>
