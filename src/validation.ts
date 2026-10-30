@@ -29,14 +29,23 @@ export const channelSchema = z.discriminatedUnion("provider", [
   })
 ]);
 
+const inventoryDecimal = z.string().regex(/^\d{1,16}(?:\.\d{1,4})?$/);
+
 export const reviewSchema = z.object({
   decision: z.enum(["approve", "reject"]),
   note: z.string().trim().max(2000).optional(),
   accountMappings: z.object({
     expenseAccountCode: z.string().trim().min(1).max(64),
     inputTaxAccountCode: z.string().trim().min(1).max(64),
-    payableAccountCode: z.string().trim().min(1).max(64)
-  }).optional()
+    payableAccountCode: z.string().trim().min(1).max(64),
+    inventoryAccountCode: z.string().trim().min(1).max(64).nullable().optional()
+  }).optional(),
+  inventoryLines: z.array(z.object({
+    lineIndex: z.number().int().min(0).max(99),
+    itemId: z.uuid(),
+    quantity: inventoryDecimal,
+    amount: inventoryDecimal
+  })).max(100).optional()
 });
 
 export const voucherEditSchema = z.object({
@@ -75,5 +84,49 @@ export const supplierSchema = z.object({
 export const ledgerMappingSchema = z.object({
   expenseAccountCode: z.string().trim().min(1).max(64),
   inputTaxAccountCode: z.string().trim().min(1).max(64),
-  payableAccountCode: z.string().trim().min(1).max(64)
+  payableAccountCode: z.string().trim().min(1).max(64),
+  inventoryAccountCode: z.string().trim().min(1).max(64).nullable().optional()
+});
+
+export const inventoryItemSchema = z.object({
+  code: z.string().trim().min(1).max(64),
+  name: z.string().trim().min(2).max(200),
+  category: z.string().trim().max(120).nullable().optional(),
+  unit: z.string().trim().max(40).nullable().optional(),
+  minimumQuantity: inventoryDecimal.default("0"),
+  location: z.string().trim().max(200).nullable().optional(),
+  notes: z.string().trim().max(2000).nullable().optional()
+});
+
+export const inventoryItemStatusSchema = z.object({
+  status: z.enum(["active", "archived"])
+});
+
+export const inventoryMovementSchema = z.object({
+  itemId: z.uuid(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  documentNumber: z.string().trim().min(1).max(100),
+  type: z.enum(["purchase_in", "production_out", "return_in", "adjustment_in", "adjustment_out"]),
+  quantity: inventoryDecimal.refine((value) => Number(value) > 0),
+  recipient: z.string().trim().max(200).nullable().optional(),
+  notes: z.string().trim().max(2000).nullable().optional()
+});
+
+export const inventoryAssignmentSchema = z.object({
+  itemId: z.uuid(),
+  documentNumber: z.string().trim().min(1).max(100),
+  issuedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  recipient: z.string().trim().min(1).max(200),
+  team: z.string().trim().max(120).nullable().optional(),
+  quantity: inventoryDecimal.refine((value) => Number(value) > 0),
+  condition: z.string().trim().max(120).nullable().optional(),
+  dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  notes: z.string().trim().max(2000).nullable().optional()
+}).refine((value) => !value.dueDate || value.dueDate >= value.issuedAt, {
+  path: ["dueDate"],
+  message: "Hạn thu hồi không được trước ngày cấp"
+});
+
+export const inventoryImportSchema = z.object({
+  openingDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 });

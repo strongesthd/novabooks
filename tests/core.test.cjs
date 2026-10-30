@@ -9,8 +9,14 @@ const { validateDocument } = require("../dist/storage.js");
 const { encryptJson, decryptJson, hashWebhookKey, constantTimeEqual } = require("../dist/crypto.js");
 const { extractedInvoiceSchema } = require("../dist/gemini.js");
 const { parseLedgerWorkbook, LedgerWorkbookError } = require("../dist/ledger.js");
+const {
+  createInventoryWorkbook, InventoryWorkbookError, parseInventoryWorkbook
+} = require("../dist/inventory.js");
+const { decimalToUnits, firstNegativeStockMovement } = require("../dist/inventory-service.js");
 const ExcelJS = require("exceljs");
-const { registerSchema, productSchema, supplierSchema } = require("../dist/validation.js");
+const {
+  inventoryAssignmentSchema, inventoryMovementSchema, registerSchema, productSchema, supplierSchema
+} = require("../dist/validation.js");
 
 test("validates document bytes against declared media type", () => {
   const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
@@ -115,3 +121,99 @@ test("rejects unbalanced entries and account codes with conflicting names", asyn
     return true;
   });
 });
+
+test("exports a five-sheet stock workbook that can be imported without recalculating formulas", async () => {
+  const buffer = await createInventoryWorkbook({
+    items: [{
+      code: "VT001", name: "Máy khoan", category: "Dụng cụ", unit: "Cái",
+      minimumQuantity: "2", location: "Kệ A1", notes: null, openingQuantity: "10",
+      currentQuantity: "15", totalIncoming: "5", totalOutgoing: "0", status: "Đủ tồn"
+    }],
+    movements: [{
+      date: "2026-06-01", documentNumber: "NK001", type: "purchase_in", itemCode: "VT001",
+      itemName: "Máy khoan", unit: "Cái", quantity: "5", recipient: "Nhà cung cấp",
+      notes: null, rowNumber: 5
+    }],
+    assignments: [{
+      documentNumber: "CP001", issuedAt: "2026-06-02", recipient: "Nguyen Van A", team: "To 1",
+      itemCode: "VT001", quantity: "1", condition: "Đang sử dụng", dueDate: "2027-06-02",
+      notes: null, status: "active", rowNumber: 5
+    }]
+  });
+  const parsed = await parseInventoryWorkbook(buffer);
+  assert.equal(parsed.items.length, 1);
+  assert.equal(parsed.items[0].openingQuantity, "10");
+  assert.equal(parsed.movements[0].type, "purchase_in");
+  assert.equal(parsed.assignments[0].status, "active");
+  assert.deepEqual(
+    ["Tổng Quan (Dashboard)", "Sổ Nhật Ký XNT", "Báo Cáo Tồn Kho", "Danh Mục Vật Tư", "Cấp Phát Thợ"],
+    (await (async () => {
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer);
+      return workbook.worksheets.map((sheet) => sheet.name);
+    })())
+  );
+});
+
+test("rejects workbook rows with uncached formulas or unsupported transaction types", async () => {
+  const formulaWorkbook = new ExcelJS.Workbook();
+  addInventorySheets(formulaWorkbook, { uncachedItemCode: true });
+  await assert.rejects(
+    parseInventoryWorkbook(Buffer.from(await formulaWorkbook.xlsx.writeBuffer())),
+    (error) => error instanceof InventoryWorkbookError && /kết quả đã lưu/.test(error.message)
+  );
+
+  const unsupportedWorkbook = new ExcelJS.Workbook();
+  addInventorySheets(unsupportedWorkbook, { transactionType: "Không xác định" });
+  await assert.rejects(
+    parseInventoryWorkbook(Buffer.from(await unsupportedWorkbook.xlsx.writeBuffer())),
+    (error) => error instanceof InventoryWorkbookError
+      && error.details.some((detail) => detail.includes("loại giao dịch chưa hỗ trợ"))
+  );
+});
+
+test("validates stock movements and uses fixed-point arithmetic for quantities", () => {
+  assert.equal(decimalToUnits("12.3456"), 123456n);
+  assert.equal(firstNegativeStockMovement("1", [
+    { type: "production_out", quantity: "0.5" },
+    { type: "production_out", quantity: "0.6" }
+  ]), 1);
+  assert.equal(firstNegativeStockMovement("1", [
+    { type: "purchase_in", quantity: "0.5" },
+    { type: "production_out", quantity: "1.5" }
+  ]), null);
+  assert.equal(inventoryMovementSchema.safeParse({
+    itemId: "e5b3cc79-1b2b-4ee9-9b82-a760340d96f0",
+    date: "2026-06-01", documentNumber: "XK-1", type: "production_out", quantity: "1.25"
+  }).success, true);
+  assert.equal(inventoryMovementSchema.safeParse({
+    itemId: "e5b3cc79-1b2b-4ee9-9b82-a760340d96f0",
+    date: "2026-06-01", documentNumber: "XK-1", type: "production_out", quantity: "-1"
+  }).success, false);
+  assert.equal(inventoryAssignmentSchema.safeParse({
+    itemId: "e5b3cc79-1b2b-4ee9-9b82-a760340d96f0",
+    documentNumber: "CP-1", issuedAt: "2026-06-01", recipient: "Nguyen Van A", quantity: "1"
+  }).success, true);
+});
+
+function addInventorySheets(workbook, options = {}) {
+  const catalog = workbook.addWorksheet("Danh Mục Vật Tư");
+  catalog.addRows([[], [], [], ["STT", "Mã Vật Tư", "Tên Vật Tư / Dụng Cụ", "Phân Loại", "Đơn Vị Tính", "Tồn Tối Thiểu", "Vị Trí Kho", "Ghi Chú"]]);
+  catalog.addRow([1, "VT001", "Máy khoan", "Dụng cụ", "Cái", 2, "Kệ A1", ""]);
+
+  const report = workbook.addWorksheet("Báo Cáo Tồn Kho");
+  report.addRows([[], [], [], ["STT", "Mã VT", "Tên Vật Tư / Dụng Cụ", "Phân Loại", "ĐVT", "Tồn Đầu Kỳ"]]);
+  report.addRow([
+    1,
+    options.uncachedItemCode ? { formula: "'Danh Mục Vật Tư'!B5" } : { formula: "'Danh Mục Vật Tư'!B5", result: "VT001" },
+    "Máy khoan", "Dụng cụ", "Cái", 10
+  ]);
+
+  const journal = workbook.addWorksheet("Sổ Nhật Ký XNT");
+  journal.addRows([[], [], [], ["STT", "Ngày Giao Dịch", "Mã Phiếu", "Loại Giao Dịch", "Mã Vật Tư", "Tên Vật Tư", "ĐVT", "Số Lượng", "Bộ Phận / Thợ Nhận", "Ghi Chú"]]);
+  journal.addRow([1, "2026-06-01", "NK001", options.transactionType || "Nhập mua", "VT001", "Máy khoan", "Cái", 5, "Kho", ""]);
+
+  const assignments = workbook.addWorksheet("Cấp Phát Thợ");
+  assignments.addRows([[], [], [], ["STT", "Mã Phiếu", "Ngày Cấp", "Họ Tên Thợ", "Tổ / Nhóm", "Mã Dụng Cụ", "Tên Dụng Cụ / Thiết Bị", "Số Lượng", "Tình Trạng", "Hạn Thu Hồi / Kiểm Định", "Ghi Chú"]]);
+  assignments.addRow([1, "CP001", "2026-06-02", "Nguyen Van A", "To 1", "VT001", "Máy khoan", 1, "Đang sử dụng", "2027-06-02", ""]);
+}

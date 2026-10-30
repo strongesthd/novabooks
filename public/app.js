@@ -5,6 +5,10 @@
   let currentUser = null;
   let registerMode = false;
   let activePage = "overview";
+  const inventoryState = {
+    itemPage: 1, movementPage: 1, assignmentPage: 1,
+    search: "", itemStatus: "active", assignmentStatus: "active"
+  };
   const $ = (selector) => document.querySelector(selector);
   const authView = $("#auth-view");
   const appView = $("#app-view");
@@ -15,6 +19,7 @@
     entries: "Sổ sách",
     suppliers: "Nhà cung cấp",
     products: "Hàng hóa",
+    inventory: "Quản lý kho",
     reports: "Báo cáo",
     channels: "Kết nối kênh",
     members: "Thành viên"
@@ -171,6 +176,7 @@
     });
     document.querySelector('[data-page="suppliers"]').classList.toggle("hidden", user.role === "staff");
     document.querySelector('[data-page="products"]').classList.toggle("hidden", user.role === "staff");
+    document.querySelector('[data-page="inventory"]').classList.toggle("hidden", user.role === "staff");
     navigate("overview");
   }
 
@@ -187,12 +193,19 @@
     return `${Number(amount).toLocaleString("vi-VN", { maximumFractionDigits: 2 })} ${escapeHtml(currency)}`;
   }
 
+  function decimalInput(value) {
+    if (value === null || value === undefined || value === "") return "";
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(4).replace(/\.?0+$/, "") : "";
+  }
+
   function statusLabel(status) {
     return ({
       received: "Đã tiếp nhận", extracting: "Đang trích xuất", needs_review: "Chờ duyệt",
       approved: "Đã duyệt", posted: "Đã ghi sổ", rejected: "Đã từ chối",
       failed: "Cần xử lý", active: "Đang hoạt động", archived: "Đã lưu trữ",
-      disabled: "Đã tắt", error: "Lỗi kết nối"
+      disabled: "Đã tắt", error: "Lỗi kết nối", returned: "Đã thu hồi",
+      low_stock: "Cần nhập", in_stock: "Đủ tồn"
     })[status] || status;
   }
 
@@ -214,6 +227,7 @@
       if (page === "entries") await renderEntries();
       if (page === "suppliers") await renderSuppliers();
       if (page === "products") await renderProducts();
+      if (page === "inventory") await renderInventory();
       if (page === "reports") await renderReports();
       if (page === "channels") await renderChannels();
       if (page === "members") await renderMembers();
@@ -304,9 +318,10 @@
   }
 
   async function renderVouchers() {
-    const [result, ledger] = await Promise.all([
+    const [result, ledger, inventory] = await Promise.all([
       api("/api/vouchers"),
-      currentUser.role === "staff" ? Promise.resolve({ accounts: [], mappings: {} }) : api("/api/ledger/accounts")
+      currentUser.role === "staff" ? Promise.resolve({ accounts: [], mappings: {} }) : api("/api/ledger/accounts"),
+      currentUser.role === "staff" ? Promise.resolve({ items: [] }) : api("/api/inventory/items/options")
     ]);
     const items = result.vouchers;
     content.innerHTML = `${heading("Chứng từ", "Kiểm tra kết quả AI và duyệt trước khi ghi sổ.", '<button class="button button-primary" data-action="upload">＋ Tải chứng từ</button>')}
@@ -325,6 +340,7 @@
       const decision = button.dataset.review;
       let note = "";
       let accountMappings;
+      let inventoryLines = [];
       if (decision === "reject") {
         const response = await showFormDialog({
           title: "Từ chối chứng từ",
@@ -349,23 +365,60 @@
           value: account.account_code,
           label: `${account.account_code} · ${account.account_name}`
         }));
+        const stockOptions = [
+          { value: "", label: "Không nhập kho" },
+          ...inventory.items.map((item) => ({
+            value: item.id,
+            label: `${item.code} · ${item.name} (tồn ${item.current_quantity} ${item.unit || ""})`
+          }))
+        ];
+        const voucher = items.find((item) => item.id === button.dataset.id);
+        const invoiceLines = Array.isArray(voucher?.extracted_data?.lineItems)
+          ? voucher.extracted_data.lineItems.slice(0, 100)
+          : [];
         const selected = await showFormDialog({
           title: "Duyệt và ghi sổ",
-          description: "Xác nhận hoặc thay đổi tài khoản cho riêng chứng từ này. Thay đổi ở đây không làm đổi cấu hình mặc định.",
+          description: "Ghép dòng hàng với vật tư nếu cần cập nhật tồn kho. Chỉ dòng đã ghép mới nhập kho; phần còn lại tiếp tục ghi nhận vào chi phí/hàng mua.",
           fields: [
             { name: "expenseAccountCode", label: "Chi phí / hàng mua", type: "select", value: defaults.expense, options: accountOptions },
             { name: "inputTaxAccountCode", label: "Thuế GTGT đầu vào", type: "select", value: defaults.input_tax, options: accountOptions },
-            { name: "payableAccountCode", label: "Phải trả nhà cung cấp", type: "select", value: defaults.accounts_payable, options: accountOptions }
+            { name: "payableAccountCode", label: "Phải trả nhà cung cấp", type: "select", value: defaults.accounts_payable, options: accountOptions },
+            { name: "inventoryAccountCode", label: "Tài khoản hàng tồn kho (tùy chọn)", type: "select", value: ledger.mappings.inventory_asset || "", options: [{ value: "", label: "Chưa cấu hình" }, ...accountOptions] },
+            ...invoiceLines.flatMap((line, index) => [
+              { name: `stockItem_${index}`, label: `Dòng ${index + 1}: ${line.description || "Hàng hóa"}`, type: "select", options: stockOptions },
+              { name: `stockQuantity_${index}`, label: "Số lượng nhập kho", type: "number", min: "0.0001", step: "0.0001", value: decimalInput(line.quantity), placeholder: "Để trống nếu không nhập kho" },
+              { name: `stockAmount_${index}`, label: "Thành tiền phân bổ", type: "number", min: "0.0001", step: "0.0001", value: decimalInput(line.amount), placeholder: "Để trống nếu không nhập kho" }
+            ])
           ],
           confirmLabel: "Duyệt & ghi sổ"
         });
         if (selected === null) return;
-        accountMappings = selected;
+        accountMappings = {
+          expenseAccountCode: selected.expenseAccountCode,
+          inputTaxAccountCode: selected.inputTaxAccountCode,
+          payableAccountCode: selected.payableAccountCode,
+          inventoryAccountCode: selected.inventoryAccountCode || null
+        };
+        for (const [lineIndex, line] of invoiceLines.entries()) {
+          const itemId = selected[`stockItem_${lineIndex}`];
+          if (!itemId) continue;
+          const quantity = selected[`stockQuantity_${lineIndex}`];
+          const amount = selected[`stockAmount_${lineIndex}`];
+          if (!quantity || Number(quantity) <= 0 || !amount || Number(amount) <= 0) {
+            toast(`Dòng ${lineIndex + 1}: cần nhập số lượng và thành tiền lớn hơn 0.`, true);
+            return;
+          }
+          inventoryLines.push({ lineIndex, itemId, quantity, amount });
+        }
+        if (inventoryLines.length && !accountMappings.inventoryAccountCode) {
+          toast("Hãy chọn tài khoản hàng tồn kho khi ghép dòng hóa đơn với vật tư.", true);
+          return;
+        }
       }
       button.disabled = true;
       try {
         await api(`/api/vouchers/${encodeURIComponent(button.dataset.id)}/review`, {
-          method: "POST", body: JSON.stringify({ decision, note: note || undefined, accountMappings })
+          method: "POST", body: JSON.stringify({ decision, note: note || undefined, accountMappings, inventoryLines })
         });
         toast(decision === "approve" ? "Đã duyệt và ghi sổ chứng từ." : "Đã từ chối chứng từ.");
         await navigate("vouchers");
@@ -489,7 +542,8 @@
           ${[
             ["expense", "Chi phí / hàng mua"],
             ["input_tax", "Thuế GTGT đầu vào"],
-            ["accounts_payable", "Phải trả nhà cung cấp"]
+            ["accounts_payable", "Phải trả nhà cung cấp"],
+            ["inventory_asset", "Hàng tồn kho (tùy chọn)"]
           ].map(([key, label]) => {
             const code = ledger.mappings[key];
             const account = ledger.accounts.find((item) => item.account_code === code);
@@ -549,13 +603,17 @@
         fields: [
           { name: "expenseAccountCode", label: "Chi phí / hàng mua", type: "select", value: ledger.mappings.expense, options },
           { name: "inputTaxAccountCode", label: "Thuế GTGT đầu vào", type: "select", value: ledger.mappings.input_tax, options },
-          { name: "payableAccountCode", label: "Phải trả nhà cung cấp", type: "select", value: ledger.mappings.accounts_payable, options }
+          { name: "payableAccountCode", label: "Phải trả nhà cung cấp", type: "select", value: ledger.mappings.accounts_payable, options },
+          { name: "inventoryAccountCode", label: "Hàng tồn kho (tùy chọn)", type: "select", value: ledger.mappings.inventory_asset || "", options: [{ value: "", label: "Chưa cấu hình" }, ...options] }
         ],
         confirmLabel: "Lưu cấu hình"
       });
       if (!mappings) return;
       try {
-        await api("/api/ledger/mappings", { method: "PUT", body: JSON.stringify(mappings) });
+        await api("/api/ledger/mappings", {
+          method: "PUT",
+          body: JSON.stringify({ ...mappings, inventoryAccountCode: mappings.inventoryAccountCode || null })
+        });
         toast("Đã lưu tài khoản định khoản mặc định.");
         await navigate("entries");
       } catch (error) { toast(error.message, true); }
@@ -659,6 +717,332 @@
       void setCatalogArchived("products", button.dataset.restoreProduct, false, () =>
         renderProducts(rows.length === 1 && page > 1 ? page - 1 : page, search, status));
     }));
+  }
+
+  async function renderInventory() {
+    const itemQuery = new URLSearchParams({
+      page: String(inventoryState.itemPage),
+      q: inventoryState.search,
+      status: inventoryState.itemStatus
+    });
+    const movementQuery = new URLSearchParams({
+      page: String(inventoryState.movementPage),
+      q: inventoryState.search
+    });
+    const assignmentQuery = new URLSearchParams({
+      page: String(inventoryState.assignmentPage),
+      q: inventoryState.search,
+      status: inventoryState.assignmentStatus
+    });
+    const [items, movements, assignments] = await Promise.all([
+      api(`/api/inventory/items?${itemQuery}`),
+      api(`/api/inventory/movements?${movementQuery}`),
+      api(`/api/inventory/assignments?${assignmentQuery}`)
+    ]);
+    content.innerHTML = `${heading(
+      "Quản lý kho",
+      "Theo dõi danh mục vật tư, số dư đầu kỳ, nhập-xuất-tồn và dụng cụ đang cấp phát.",
+      '<button class="button button-secondary" data-inventory-action="template">Tải mẫu</button><button class="button button-secondary" data-inventory-action="export">Xuất Excel</button><button class="button button-secondary" data-inventory-action="import">Nhập workbook</button><button class="button button-secondary" data-inventory-action="movement">Ghi nhập/xuất</button><button class="button button-primary" data-inventory-action="assignment">Cấp phát dụng cụ</button><button class="button button-primary" data-inventory-action="item">＋ Thêm vật tư</button>'
+    )}
+      <form class="catalog-toolbar" data-inventory-filter>
+        <input name="q" type="search" maxlength="100" placeholder="Tìm mã vật tư, tên, phiếu hoặc người nhận" value="${escapeHtml(inventoryState.search)}">
+        <select name="itemStatus" aria-label="Lọc trạng thái vật tư">
+          <option value="active" ${inventoryState.itemStatus === "active" ? "selected" : ""}>Vật tư đang dùng</option>
+          <option value="archived" ${inventoryState.itemStatus === "archived" ? "selected" : ""}>Vật tư lưu trữ</option>
+          <option value="all" ${inventoryState.itemStatus === "all" ? "selected" : ""}>Tất cả vật tư</option>
+        </select>
+        <select name="assignmentStatus" aria-label="Lọc trạng thái cấp phát">
+          <option value="active" ${inventoryState.assignmentStatus === "active" ? "selected" : ""}>Đang cấp phát</option>
+          <option value="returned" ${inventoryState.assignmentStatus === "returned" ? "selected" : ""}>Đã thu hồi</option>
+          <option value="all" ${inventoryState.assignmentStatus === "all" ? "selected" : ""}>Tất cả cấp phát</option>
+        </select>
+        <button class="button button-secondary compact" type="submit">Lọc dữ liệu</button>
+      </form>
+      <section class="panel inventory-panel">
+        <div class="panel-header"><div><h2>Danh mục & tồn kho</h2><p>Số tồn được tính từ tồn đầu kỳ cộng nhật ký kho; lưu trữ không xóa lịch sử.</p></div></div>
+        ${items.items.length ? `<div class="table-wrap"><table><thead><tr><th>Mã</th><th>Vật tư</th><th>Phân loại</th><th>Đơn vị</th><th>Tồn hiện tại</th><th>Tồn tối thiểu</th><th>Cảnh báo tồn</th><th>Trạng thái</th><th>Thao tác</th></tr></thead><tbody>${items.items.map((item) => `<tr>
+          <td><strong>${escapeHtml(item.code)}</strong></td><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.category || "—")}</td>
+          <td>${escapeHtml(item.unit || "—")}</td><td><strong>${escapeHtml(item.current_quantity)}</strong></td>
+          <td>${escapeHtml(item.minimum_quantity)}</td><td>${statusPill(isLowStock(item.current_quantity, item.minimum_quantity) ? "low_stock" : "in_stock")}</td>
+          <td>${statusPill(item.status)}</td>
+          <td><div class="table-actions"><button class="button button-secondary compact" data-edit-inventory-item="${escapeHtml(item.id)}">Sửa</button>
+            ${item.status === "active"
+              ? `<button class="button button-danger compact" data-inventory-status="${escapeHtml(item.id)}" data-next-status="archived">Lưu trữ</button>`
+              : `<button class="button button-secondary compact" data-inventory-status="${escapeHtml(item.id)}" data-next-status="active">Khôi phục</button>`}
+          </div></td>
+        </tr>`).join("")}</tbody></table></div>` : empty("Chưa có vật tư", "Thêm thủ công hoặc nhập workbook kho để tải danh mục, số dư và lịch sử.")}${inventoryPagination("items", items.page, items.pageSize, items.total)}
+      </section>
+      <section class="panel inventory-panel">
+        <div class="panel-header"><div><h2>Nhật ký nhập - xuất - tồn</h2><p>Mọi thay đổi tồn được ghi thành giao dịch; không sửa/xóa lịch sử đã ghi.</p></div></div>
+        ${movements.movements.length ? `<div class="table-wrap"><table><thead><tr><th>Ngày</th><th>Mã phiếu</th><th>Loại</th><th>Vật tư</th><th>Số lượng</th><th>Nơi nhận</th><th>Ghi chú</th></tr></thead><tbody>${movements.movements.map((movement) => `<tr>
+          <td>${escapeHtml(new Date(`${movement.movement_date}T00:00:00`).toLocaleDateString("vi-VN"))}</td>
+          <td><strong>${escapeHtml(movement.document_number)}</strong></td><td>${escapeHtml(inventoryMovementLabel(movement.movement_type))}</td>
+          <td>${escapeHtml(movement.item_code)} · ${escapeHtml(movement.item_name)}</td><td>${escapeHtml(movement.quantity)} ${escapeHtml(movement.unit || "")}</td>
+          <td>${escapeHtml(movement.recipient || "—")}</td><td>${escapeHtml(movement.notes || "—")}</td>
+        </tr>`).join("")}</tbody></table></div>` : empty("Chưa có giao dịch kho", "Nhập workbook, ghi nhập/xuất hoặc duyệt hóa đơn đã ghép vật tư.")}${inventoryPagination("movements", movements.page, movements.pageSize, movements.total)}
+      </section>
+      <section class="panel inventory-panel">
+        <div class="panel-header"><div><h2>Cấp phát dụng cụ</h2><p>Thu hồi sẽ tạo giao dịch nhập kho và lưu dấu thời gian; cấp phát được kiểm tra tồn trước khi ghi.</p></div></div>
+        ${assignments.assignments.length ? `<div class="table-wrap"><table><thead><tr><th>Phiếu / ngày</th><th>Dụng cụ</th><th>Người nhận</th><th>Số lượng</th><th>Tình trạng</th><th>Hạn thu hồi</th><th>Thao tác</th></tr></thead><tbody>${assignments.assignments.map((entry) => `<tr>
+          <td>${escapeHtml(entry.document_number)}<br><small>${escapeHtml(entry.issued_at)}</small></td>
+          <td>${escapeHtml(entry.item_code)} · ${escapeHtml(entry.item_name)}</td><td>${escapeHtml(entry.recipient)}${entry.team ? `<br><small>${escapeHtml(entry.team)}</small>` : ""}</td>
+          <td>${escapeHtml(entry.quantity)} ${escapeHtml(entry.unit || "")}</td><td>${statusPill(entry.status)}</td><td>${escapeHtml(entry.due_date || "—")}</td>
+          <td>${entry.status === "active" ? `<button class="button button-secondary compact" data-return-assignment="${escapeHtml(entry.id)}">Đã thu hồi</button>` : "—"}</td>
+        </tr>`).join("")}</tbody></table></div>` : empty("Không có phiếu cấp phát", "Phiếu đang cấp phát và lịch sử thu hồi sẽ hiển thị tại đây.")}${inventoryPagination("assignments", assignments.page, assignments.pageSize, assignments.total)}
+      </section>
+      <input id="inventory-upload" class="hidden" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">`;
+
+    content.querySelector("[data-inventory-filter]").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+      inventoryState.search = String(values.q || "").trim();
+      inventoryState.itemStatus = String(values.itemStatus || "active");
+      inventoryState.assignmentStatus = String(values.assignmentStatus || "active");
+      inventoryState.itemPage = inventoryState.movementPage = inventoryState.assignmentPage = 1;
+      void renderInventory();
+    });
+    content.querySelectorAll("[data-inventory-page]").forEach((button) => button.addEventListener("click", () => {
+      const [list, page] = button.dataset.inventoryPage.split(":");
+      if (list === "items") inventoryState.itemPage = Number(page);
+      if (list === "movements") inventoryState.movementPage = Number(page);
+      if (list === "assignments") inventoryState.assignmentPage = Number(page);
+      void renderInventory();
+    }));
+    content.querySelector('[data-inventory-action="item"]').addEventListener("click", () => void editInventoryItem());
+    content.querySelectorAll("[data-edit-inventory-item]").forEach((button) => {
+      button.addEventListener("click", () => void editInventoryItem(
+        items.items.find((item) => item.id === button.dataset.editInventoryItem)
+      ));
+    });
+    content.querySelectorAll("[data-inventory-status]").forEach((button) => button.addEventListener("click", async () => {
+      const status = button.dataset.nextStatus;
+      if (status === "archived" && !await showConfirmDialog(
+        "Lưu trữ vật tư?",
+        "Vật tư chỉ được lưu trữ khi tồn bằng 0 và không có phiếu cấp phát đang mở. Lịch sử kho vẫn được giữ lại.",
+        "Lưu trữ"
+      )) return;
+      try {
+        await api(`/api/inventory/items/${encodeURIComponent(button.dataset.inventoryStatus)}/status`, {
+          method: "PATCH", body: JSON.stringify({ status })
+        });
+        toast(status === "archived" ? "Đã lưu trữ vật tư." : "Đã khôi phục vật tư.");
+        await renderInventory();
+      } catch (error) { toast(error.message, true); }
+    }));
+    content.querySelector('[data-inventory-action="movement"]').addEventListener("click", () => void createMovementDialog());
+    content.querySelector('[data-inventory-action="assignment"]').addEventListener("click", () => void createAssignmentDialog());
+    content.querySelector('[data-inventory-action="template"]').addEventListener("click", () => void downloadInventory("/api/inventory/template", "novabooks-inventory-template.xlsx"));
+    content.querySelector('[data-inventory-action="export"]').addEventListener("click", () => void downloadInventory("/api/inventory/export", "novabooks-inventory.xlsx"));
+    const uploadInput = $("#inventory-upload");
+    content.querySelector('[data-inventory-action="import"]').addEventListener("click", () => uploadInput.click());
+    uploadInput.addEventListener("change", () => void importInventoryWorkbook(uploadInput));
+    content.querySelectorAll("[data-return-assignment]").forEach((button) => button.addEventListener("click", async () => {
+      if (!await showConfirmDialog(
+        "Xác nhận thu hồi dụng cụ?",
+        "Hệ thống sẽ ghi một giao dịch nhập kho cho toàn bộ số lượng đang cấp; lịch sử cấp phát được giữ nguyên.",
+        "Xác nhận thu hồi"
+      )) return;
+      try {
+        await api(`/api/inventory/assignments/${encodeURIComponent(button.dataset.returnAssignment)}/return`, { method: "POST" });
+        toast("Đã ghi nhận thu hồi và cập nhật tồn kho.");
+        await renderInventory();
+      } catch (error) { toast(error.message, true); }
+    }));
+  }
+
+  function inventoryPagination(key, page, pageSize, total) {
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
+    return `<div class="list-pagination"><span>${total} bản ghi · trang ${page}/${pageCount}</span><div>
+      <button class="button button-secondary compact" data-inventory-page="${key}:${page - 1}" ${page <= 1 ? "disabled" : ""}>← Trước</button>
+      <button class="button button-secondary compact" data-inventory-page="${key}:${page + 1}" ${page >= pageCount ? "disabled" : ""}>Sau →</button>
+    </div></div>`;
+  }
+
+  function inventoryMovementLabel(type) {
+    return ({
+      purchase_in: "Nhập mua", production_out: "Xuất sản xuất", issue_out: "Cấp phát thợ",
+      return_in: "Thu hồi", adjustment_in: "Điều chỉnh tăng", adjustment_out: "Điều chỉnh giảm"
+    })[type] || type;
+  }
+
+  function isLowStock(current, minimum) {
+    const units = (value) => {
+      const match = /^(\d+)(?:\.(\d{1,4}))?$/.exec(String(value));
+      return match?.[1] ? BigInt(match[1]) * 10000n + BigInt((match[2] || "").padEnd(4, "0") || "0") : 0n;
+    };
+    return units(current) <= units(minimum);
+  }
+
+  async function editInventoryItem(item) {
+    const values = await showFormDialog({
+      title: item ? "Sửa thông tin vật tư" : "Thêm vật tư",
+      description: "Số dư đầu kỳ chỉ thay đổi qua import hoặc giao dịch điều chỉnh để không làm sai lịch sử kho.",
+      fields: [
+        { name: "code", label: "Mã vật tư", value: item?.code, required: true },
+        { name: "name", label: "Tên vật tư", value: item?.name, required: true, minLength: 2 },
+        { name: "category", label: "Phân loại", value: item?.category },
+        { name: "unit", label: "Đơn vị tính", value: item?.unit },
+        { name: "minimumQuantity", label: "Tồn tối thiểu", type: "number", min: "0", step: "0.0001", value: item?.minimum_quantity || "0" },
+        { name: "location", label: "Vị trí kho", value: item?.location },
+        { name: "notes", label: "Ghi chú", type: "textarea", value: item?.notes }
+      ],
+      confirmLabel: item ? "Lưu thay đổi" : "Thêm vật tư"
+    });
+    if (!values) return;
+    const payload = {
+      code: values.code.trim(), name: values.name.trim(), category: values.category.trim() || null,
+      unit: values.unit.trim() || null, minimumQuantity: values.minimumQuantity || "0",
+      location: values.location.trim() || null, notes: values.notes.trim() || null
+    };
+    try {
+      await api(item ? `/api/inventory/items/${encodeURIComponent(item.id)}` : "/api/inventory/items", {
+        method: item ? "PUT" : "POST", body: JSON.stringify(payload)
+      });
+      toast(item ? "Đã cập nhật vật tư." : "Đã thêm vật tư.");
+      await renderInventory();
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function inventoryItemOptions() {
+    const result = await api("/api/inventory/items/options");
+    if (!result.items.length) throw new Error("Hãy thêm vật tư hoặc nhập workbook kho trước.");
+    return result.items.map((item) => ({
+      value: item.id,
+      label: `${item.code} · ${item.name} (tồn ${item.current_quantity} ${item.unit || ""})`
+    }));
+  }
+
+  async function createMovementDialog() {
+    let itemOptions;
+    try { itemOptions = await inventoryItemOptions(); }
+    catch (error) { toast(error.message, true); return; }
+    const values = await showFormDialog({
+      title: "Ghi giao dịch kho",
+      description: "Giao dịch xuất sẽ bị từ chối nếu tồn khả dụng không đủ. Điều chỉnh được ghi nối tiếp, không sửa số dư gốc.",
+      fields: [
+        { name: "itemId", label: "Vật tư", type: "select", options: itemOptions, required: true },
+        { name: "type", label: "Loại giao dịch", type: "select", required: true, options: [
+          { value: "purchase_in", label: "Nhập mua" }, { value: "production_out", label: "Xuất sản xuất" },
+          { value: "return_in", label: "Thu hồi" }, { value: "adjustment_in", label: "Điều chỉnh tăng" },
+          { value: "adjustment_out", label: "Điều chỉnh giảm" }
+        ] },
+        { name: "date", label: "Ngày giao dịch", type: "date", value: localDate(), required: true },
+        { name: "documentNumber", label: "Mã phiếu", required: true },
+        { name: "quantity", label: "Số lượng", type: "number", min: "0.0001", step: "0.0001", required: true },
+        { name: "recipient", label: "Nơi nhận / người nhận" },
+        { name: "notes", label: "Ghi chú", type: "textarea" }
+      ],
+      confirmLabel: "Ghi giao dịch"
+    });
+    if (!values) return;
+    try {
+      await api("/api/inventory/movements", {
+        method: "POST",
+        body: JSON.stringify({
+          ...values, recipient: values.recipient.trim() || null, notes: values.notes.trim() || null
+        })
+      });
+      toast("Đã ghi giao dịch kho.");
+      await renderInventory();
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function createAssignmentDialog() {
+    let itemOptions;
+    try { itemOptions = await inventoryItemOptions(); }
+    catch (error) { toast(error.message, true); return; }
+    const values = await showFormDialog({
+      title: "Cấp phát dụng cụ",
+      description: "Tạo phiếu theo dõi người nhận và tự động trừ tồn. Có thể thu hồi từ danh sách bên dưới.",
+      fields: [
+        { name: "itemId", label: "Dụng cụ", type: "select", options: itemOptions, required: true },
+        { name: "documentNumber", label: "Mã phiếu cấp", required: true },
+        { name: "issuedAt", label: "Ngày cấp", type: "date", value: localDate(), required: true },
+        { name: "recipient", label: "Người nhận", required: true },
+        { name: "team", label: "Bộ phận / nhóm" },
+        { name: "quantity", label: "Số lượng", type: "number", min: "0.0001", step: "0.0001", required: true },
+        { name: "condition", label: "Tình trạng", value: "Đang sử dụng" },
+        { name: "dueDate", label: "Hạn thu hồi / kiểm định", type: "date" },
+        { name: "notes", label: "Ghi chú", type: "textarea" }
+      ],
+      confirmLabel: "Cấp phát"
+    });
+    if (!values) return;
+    try {
+      await api("/api/inventory/assignments", {
+        method: "POST",
+        body: JSON.stringify({
+          ...values, team: values.team.trim() || null, condition: values.condition.trim() || null,
+          dueDate: values.dueDate || null, notes: values.notes.trim() || null
+        })
+      });
+      toast("Đã cấp phát và trừ tồn kho.");
+      await renderInventory();
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function importInventoryWorkbook(input) {
+    const file = input.files?.[0];
+    if (!file) return;
+    const dateForm = await showFormDialog({
+      title: "Ngày bắt đầu tồn kho",
+      description: "Nhập ngày hiệu lực của số dư đầu kỳ trong sheet Báo Cáo Tồn Kho. Các giao dịch trong nhật ký phải từ ngày này trở đi.",
+      fields: [{ name: "openingDate", label: "Ngày tồn đầu kỳ", type: "date", required: true }],
+      confirmLabel: "Kiểm tra workbook"
+    });
+    if (!dateForm) { input.value = ""; return; }
+    const formData = new FormData();
+    formData.append("inventory", file);
+    formData.append("openingDate", dateForm.openingDate);
+    try {
+      const preview = await api("/api/inventory/import/preview", { method: "POST", body: formData });
+      if (!preview.canImport) {
+        toast(preview.duplicateBatch
+          ? "Workbook này đã được nhập trước đó."
+          : (preview.errors || []).slice(0, 3).join(" ") || "Workbook chưa thể nhập.", true);
+        input.value = "";
+        return;
+      }
+      const summary = [
+        `${preview.itemCount} vật tư mới`,
+        `${preview.movementCount} giao dịch kho`,
+        `${preview.assignmentCount} phiếu cấp phát`
+      ].join(" · ");
+      const warnings = preview.warnings?.length ? `\n\nLưu ý:\n${preview.warnings.join("\n")}` : "";
+      if (!await showConfirmDialog(
+        "Xác nhận nhập workbook kho",
+        `${summary}. Số dư và danh mục của mã đã tồn tại sẽ được giữ nguyên; giao dịch trùng được bỏ qua.${warnings}`,
+        "Nhập dữ liệu"
+      )) { input.value = ""; return; }
+      const imported = await api("/api/inventory/import", { method: "POST", body: formData });
+      toast(`Đã nhập ${imported.itemCount} vật tư, ${imported.movementCount} giao dịch và ${imported.assignmentCount} phiếu cấp phát.`);
+      await renderInventory();
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      input.value = "";
+    }
+  }
+
+  async function downloadInventory(url, filename) {
+    try {
+      const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || "Không thể tải workbook kho.");
+      }
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(objectUrl);
+    } catch (error) { toast(error.message, true); }
+  }
+
+  function localDate() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   }
 
   async function editSupplierWithDialog(supplier, refresh = () => renderSuppliers()) {

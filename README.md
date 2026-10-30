@@ -95,6 +95,16 @@ PostgreSQL chỉ nằm trên Docker network, không publish ra Internet. `DB_ADM
 - Bút toán đã hạch toán là bất biến, không hỗ trợ sửa/xóa trực tiếp. Dùng **Lập bút toán đảo** để tạo bút toán đối ứng vào ngày hiện tại; bút toán gốc được giữ nguyên và mỗi bút toán gốc chỉ được đảo một lần.
 - Excel là nguồn dữ liệu do doanh nghiệp cung cấp; NovaBooks không tự suy diễn danh mục hay ánh xạ tài khoản. Hãy kiểm tra kỹ mapping với kế toán trưởng trước khi duyệt.
 
+### Quản lý kho theo workbook nhập - xuất - tồn
+
+- Mở **Quản lý kho → Tải mẫu** để tải workbook 5 sheet: `Tổng Quan (Dashboard)`, `Sổ Nhật Ký XNT`, `Báo Cáo Tồn Kho`, `Danh Mục Vật Tư` và `Cấp Phát Thợ`. Header nằm ở hàng 4, dữ liệu bắt đầu từ hàng 5. Có thể nhập trực tiếp workbook theo cấu trúc này; đây là luồng kho riêng, không dùng importer sổ kế toán Nợ/Có.
+- Khi nhập, chọn **ngày hiệu lực của tồn đầu kỳ** trong sheet `Báo Cáo Tồn Kho`. Mã vật tư mới được tạo cùng số dư, mức tồn tối thiểu, phân loại, đơn vị, vị trí và ghi chú. Mã đã tồn tại giữ nguyên danh mục/số dư hiện có; nhật ký hoặc phiếu cấp phát trùng được bỏ qua. Preview báo số lượng được thêm, giao dịch bị bỏ qua và lỗi trước khi ghi dữ liệu.
+- Nhật ký tồn được tính từ tồn đầu kỳ cộng giao dịch nhập/trả/điều chỉnh tăng trừ xuất sản xuất/cấp phát/điều chỉnh giảm. Nhập kho từ workbook bị chặn nếu giao dịch trước ngày tồn đầu kỳ, ghi lùi quá nhật ký đã có hoặc khiến tồn âm. Số dư đầu kỳ là bất biến; dùng giao dịch điều chỉnh thay vì sửa số dư.
+- Khi duyệt hóa đơn OCR, kế toán có thể ghép từng dòng hàng với một vật tư và xác nhận số lượng/thành tiền. Chỉ dòng đã ghép mới tăng tồn, đồng thời ghi Nợ tài khoản hàng tồn kho (cấu hình tại **Sổ sách → Cấu hình tài khoản**) trong cùng transaction với bút toán và trạng thái duyệt. Dòng không ghép không tự cộng tồn và vẫn được ghi theo tài khoản chi phí/hàng mua.
+- **Ghi nhập/xuất** hỗ trợ nhập mua, xuất sản xuất, thu hồi và điều chỉnh; giao dịch xuất không thể làm tồn âm và nhật ký đã ghi không sửa/xóa. **Cấp phát dụng cụ** tạo phiếu riêng, trừ tồn; xác nhận thu hồi sẽ thêm giao dịch nhập và giữ lịch sử cấp phát. Sheet mẫu không có ngày thu hồi nên trạng thái “Đã thu hồi” khi import chỉ lưu lịch sử cấp phát; cần có dòng thu hồi tương ứng trong nhật ký XNT để cập nhật tồn. Vật tư chỉ được lưu trữ khi tồn bằng 0, không còn phiếu cấp phát đang mở.
+- **Xuất Excel** tạo workbook cùng 5 sheet với giá trị hiện tại (không phụ thuộc Excel tính lại công thức). Công thức có kết quả lưu sẵn được đọc từ giá trị đã lưu; công thức không có kết quả lưu sẵn và loại giao dịch chưa hỗ trợ sẽ bị từ chối, không tự đoán số liệu.
+- Tồn kho, vật tư, giao dịch, cấp phát và các lượt nhập đều được phân tách theo `tenant_id` bằng RLS. Excel chỉ là phương tiện nhập/xuất; dữ liệu PostgreSQL theo tenant là nguồn sự thật sau khi nhập.
+
 ## Tích hợp Telegram
 
 1. Tạo Bot qua BotFather và thêm Bot vào nhóm nhận chứng từ/báo cáo.

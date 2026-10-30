@@ -20,16 +20,27 @@ import {
 } from "./db";
 import { startDailyReporter } from "./reporting";
 import { createLedgerTemplate, LedgerWorkbookError, parseLedgerWorkbook } from "./ledger";
+import {
+  createInventoryWorkbook, InventoryAssignmentInput, InventoryCatalogEntry, InventoryMovementInput as ParsedInventoryMovement,
+  InventoryMovementType, InventoryWorkbookError, normalizeInventoryCode, parseInventoryWorkbook,
+  ParsedInventoryWorkbook
+} from "./inventory";
+import {
+  createInventoryAssignment, createInventoryMovement, currentInventoryQuantity,
+  decimalToUnits, firstNegativeStockMovement, returnInventoryAssignment
+} from "./inventory-service";
 import { DocumentValidationError, loadDocument } from "./storage";
 import { AuthenticatedRequest, AuthContext, TenantRole } from "./types";
 import {
-  channelSchema, inviteSchema, ledgerMappingSchema, loginSchema, productSchema, registerSchema, reviewSchema,
-  supplierSchema
+  channelSchema, inventoryAssignmentSchema, inventoryImportSchema, inventoryItemSchema,
+  inventoryItemStatusSchema, inventoryMovementSchema, inviteSchema, ledgerMappingSchema, loginSchema, productSchema,
+  registerSchema, reviewSchema, supplierSchema
 } from "./validation";
 import {
-  createVoucherFromUpload, editVoucher, getVoucherDocument, HttpError, listVouchers,
+  createVoucherFromUpload, editVoucher, getVoucherDocument, listVouchers,
   retryVoucherExtraction, reviewVoucher
 } from "./vouchers";
+import { HttpError } from "./http-error";
 
 type RawRequest = Request & { rawBody?: Buffer };
 type InboundEvent = { channelId: string; eventId: string; file: Buffer; mimeType: string; size: number };
@@ -237,7 +248,7 @@ app.post("/api/vouchers/:voucherId/review", authenticate, requireRoles("tenant_a
     const auth = (req as AuthenticatedRequest).auth;
     const input = reviewSchema.parse(req.body);
     const result = await reviewVoucher(
-      auth, uuidParam(req.params.voucherId), input.decision, input.note, input.accountMappings
+      auth, uuidParam(req.params.voucherId), input.decision, input.note, input.accountMappings, input.inventoryLines
     );
     res.json(result);
   } catch (error) {
@@ -512,11 +523,14 @@ app.put("/api/ledger/mappings", authenticate, requireRoles("tenant_admin", "acco
   try {
     const auth = (req as AuthenticatedRequest).auth;
     const input = ledgerMappingSchema.parse(req.body);
-    const mappings = [
+    const mappings: Array<[string, string]> = [
       ["expense", input.expenseAccountCode],
       ["input_tax", input.inputTaxAccountCode],
       ["accounts_payable", input.payableAccountCode]
-    ] as const;
+    ];
+    if (input.inventoryAccountCode) {
+      mappings.push(["inventory_asset", input.inventoryAccountCode]);
+    }
     await withTenantTransaction(auth.tenantId, async (tx) => {
       const accountCodes = mappings.map(([, code]) => code);
       const found = await tx.query<{ account_code: string }>(
@@ -535,6 +549,12 @@ app.put("/api/ledger/mappings", authenticate, requireRoles("tenant_admin", "acco
           [auth.tenantId, mappingKey, accountCode]
         );
       }
+      if (!input.inventoryAccountCode) {
+        await tx.query(
+          "DELETE FROM tenant_account_mappings WHERE tenant_id = $1 AND mapping_key = 'inventory_asset'",
+          [auth.tenantId]
+        );
+      }
       await tx.query(
         `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, details)
          VALUES ($1, $2, 'ledger.account_mappings_updated', 'tenant_account_mappings', $3)`,
@@ -545,6 +565,528 @@ app.put("/api/ledger/mappings", authenticate, requireRoles("tenant_admin", "acco
   } catch (error) {
     if (isUniqueViolation(error)) {
       res.status(409).json({ error: "Cấu hình tài khoản đã thay đổi đồng thời; hãy tải lại và thử lại." });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.get("/api/inventory/items/options", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const result = await withTenantTransaction(auth.tenantId, async (tx) => tx.query(
+      `SELECT i.id, i.code, i.name, i.unit,
+              (i.opening_quantity + COALESCE(sum(
+                 CASE WHEN m.movement_type IN ('purchase_in', 'return_in', 'adjustment_in') THEN m.quantity
+                      ELSE -m.quantity END
+               ), 0))::text AS current_quantity
+       FROM inventory_items i
+       LEFT JOIN inventory_movements m
+         ON m.tenant_id = i.tenant_id AND m.item_id = i.id
+       WHERE i.status = 'active'
+       GROUP BY i.tenant_id, i.id
+       ORDER BY i.code
+       LIMIT 2000`
+    ), auth.userId);
+    res.json({ items: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/inventory/items", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const options = parseListOptions(req, true);
+    const result = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const filter = `($1 = 'all' OR i.status = $1)
+        AND ($2 = '' OR i.code ILIKE '%' || $2 || '%' OR i.name ILIKE '%' || $2 || '%'
+             OR COALESCE(i.category, '') ILIKE '%' || $2 || '%')`;
+      const count = await tx.query<{ total: string }>(
+        `SELECT count(*)::text AS total FROM inventory_items i WHERE ${filter}`,
+        [options.status, options.search]
+      );
+      const rows = await tx.query(
+        `SELECT i.id, i.code, i.name, i.category, i.unit, i.minimum_quantity::text,
+                i.location, i.notes, i.opening_quantity::text, i.opening_date::text, i.status,
+                (i.opening_quantity + COALESCE(sum(
+                   CASE WHEN m.movement_type IN ('purchase_in', 'return_in', 'adjustment_in') THEN m.quantity
+                        ELSE -m.quantity END
+                 ), 0))::text AS current_quantity,
+                COALESCE(sum(CASE WHEN m.movement_type IN ('purchase_in', 'return_in', 'adjustment_in')
+                                  THEN m.quantity ELSE 0 END), 0)::text AS total_incoming,
+                COALESCE(sum(CASE WHEN m.movement_type IN ('production_out', 'issue_out', 'adjustment_out')
+                                  THEN m.quantity ELSE 0 END), 0)::text AS total_outgoing
+         FROM inventory_items i
+         LEFT JOIN inventory_movements m ON m.tenant_id = i.tenant_id AND m.item_id = i.id
+         WHERE ${filter}
+         GROUP BY i.tenant_id, i.id
+         ORDER BY i.code
+         LIMIT $3 OFFSET $4`,
+        [options.status, options.search, options.pageSize, options.offset]
+      );
+      return { items: rows.rows, total: Number(count.rows[0]?.total ?? 0) };
+    }, auth.userId);
+    res.json({ ...result, page: options.page, pageSize: options.pageSize });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/inventory/items", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const input = inventoryItemSchema.parse(req.body);
+    const item = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const result = await tx.query<{ id: string }>(
+        `INSERT INTO inventory_items
+           (tenant_id, code, name, category, unit, minimum_quantity, location, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        [
+          auth.tenantId, input.code, input.name, input.category ?? null, input.unit ?? null,
+          input.minimumQuantity, input.location ?? null, input.notes ?? null
+        ]
+      );
+      const id = result.rows[0]?.id;
+      if (!id) throw new Error("Inventory item insert returned no identifier");
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id, details)
+         VALUES ($1, $2, 'inventory.item_created', 'inventory_item', $3, $4)`,
+        [auth.tenantId, auth.userId, id, JSON.stringify({ code: input.code })]
+      );
+      return { id };
+    }, auth.userId);
+    res.status(201).json(item);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      res.status(409).json({ error: "Mã vật tư đã tồn tại trong doanh nghiệp." });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.put("/api/inventory/items/:itemId", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const input = inventoryItemSchema.parse(req.body);
+    const itemId = uuidParam(req.params.itemId);
+    await withTenantTransaction(auth.tenantId, async (tx) => {
+      const result = await tx.query(
+        `UPDATE inventory_items
+         SET code = $3, name = $4, category = $5, unit = $6, minimum_quantity = $7,
+             location = $8, notes = $9, updated_at = now()
+         WHERE tenant_id = $1 AND id = $2`,
+        [
+          auth.tenantId, itemId, input.code, input.name, input.category ?? null, input.unit ?? null,
+          input.minimumQuantity, input.location ?? null, input.notes ?? null
+        ]
+      );
+      if (!result.rowCount) throw new HttpError(404, "Không tìm thấy vật tư trong tenant hiện tại");
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id, details)
+         VALUES ($1, $2, 'inventory.item_updated', 'inventory_item', $3, $4)`,
+        [auth.tenantId, auth.userId, itemId, JSON.stringify({ code: input.code })]
+      );
+    }, auth.userId);
+    res.json({ status: "updated" });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      res.status(409).json({ error: "Mã vật tư đã tồn tại trong doanh nghiệp." });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.patch("/api/inventory/items/:itemId/status", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const itemId = uuidParam(req.params.itemId);
+    const { status } = inventoryItemStatusSchema.parse(req.body);
+    await withTenantTransaction(auth.tenantId, async (tx) => {
+      const item = await tx.query<{ id: string; status: string }>(
+        "SELECT id, status FROM inventory_items WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
+        [auth.tenantId, itemId]
+      );
+      if (!item.rows[0]) throw new HttpError(404, "Không tìm thấy vật tư trong tenant hiện tại");
+      if (status === "archived") {
+        const quantity = await currentInventoryQuantity(tx, auth.tenantId, itemId);
+        if (decimalToUnits(quantity) !== 0n) {
+          throw new HttpError(409, "Chỉ có thể lưu trữ vật tư khi tồn kho bằng 0");
+        }
+        const activeAssignments = await tx.query(
+          "SELECT 1 FROM inventory_assignments WHERE tenant_id = $1 AND item_id = $2 AND status = 'active' LIMIT 1",
+          [auth.tenantId, itemId]
+        );
+        if (activeAssignments.rowCount) {
+          throw new HttpError(409, "Vật tư đang có phiếu cấp phát chưa thu hồi");
+        }
+      }
+      await tx.query(
+        "UPDATE inventory_items SET status = $3, updated_at = now() WHERE tenant_id = $1 AND id = $2",
+        [auth.tenantId, itemId, status]
+      );
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id, details)
+         VALUES ($1, $2, 'inventory.item_status_changed', 'inventory_item', $3, $4)`,
+        [auth.tenantId, auth.userId, itemId, JSON.stringify({ status })]
+      );
+    }, auth.userId);
+    res.json({ status });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/inventory/movements", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const options = parseListOptions(req);
+    const type = req.query.type === undefined ? "" : req.query.type;
+    const types = ["purchase_in", "production_out", "issue_out", "return_in", "adjustment_in", "adjustment_out"];
+    if (typeof type !== "string" || (type && !types.includes(type))) {
+      throw new HttpError(400, "Loại giao dịch kho không hợp lệ");
+    }
+    const result = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const filter = `($1 = '' OR m.document_number ILIKE '%' || $1 || '%'
+          OR i.code ILIKE '%' || $1 || '%' OR i.name ILIKE '%' || $1 || '%')
+        AND ($2 = '' OR m.movement_type = $2)`;
+      const count = await tx.query<{ total: string }>(
+        `SELECT count(*)::text AS total
+         FROM inventory_movements m JOIN inventory_items i ON i.tenant_id = m.tenant_id AND i.id = m.item_id
+         WHERE ${filter}`,
+        [options.search, type]
+      );
+      const rows = await tx.query(
+        `SELECT m.id, m.movement_date::text, m.document_number, m.movement_type,
+                m.quantity::text, m.recipient, m.notes, i.code AS item_code, i.name AS item_name, i.unit
+         FROM inventory_movements m
+         JOIN inventory_items i ON i.tenant_id = m.tenant_id AND i.id = m.item_id
+         WHERE ${filter}
+         ORDER BY m.movement_date DESC, m.created_at DESC
+         LIMIT $3 OFFSET $4`,
+        [options.search, type, options.pageSize, options.offset]
+      );
+      return { movements: rows.rows, total: Number(count.rows[0]?.total ?? 0) };
+    }, auth.userId);
+    res.json({ ...result, page: options.page, pageSize: options.pageSize });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/inventory/movements", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const input = inventoryMovementSchema.parse(req.body);
+    assertDateOnly(input.date);
+    await withTenantTransaction(auth.tenantId, async (tx) => {
+      await createInventoryMovement(tx, auth, input);
+    }, auth.userId);
+    res.status(201).json({ status: "recorded" });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/inventory/assignments", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const options = parseListOptions(req, true);
+    const result = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const filter = `($1 = 'all' OR a.status = $1)
+        AND ($2 = '' OR a.document_number ILIKE '%' || $2 || '%'
+             OR a.recipient ILIKE '%' || $2 || '%' OR i.code ILIKE '%' || $2 || '%'
+             OR i.name ILIKE '%' || $2 || '%')`;
+      const count = await tx.query<{ total: string }>(
+        `SELECT count(*)::text AS total
+         FROM inventory_assignments a JOIN inventory_items i ON i.tenant_id = a.tenant_id AND i.id = a.item_id
+         WHERE ${filter}`,
+        [options.status, options.search]
+      );
+      const rows = await tx.query(
+        `SELECT a.id, a.document_number, a.issued_at::text, a.recipient, a.team,
+                a.quantity::text, a.condition, a.due_date::text, a.notes, a.status,
+                a.returned_at, i.id AS item_id, i.code AS item_code, i.name AS item_name, i.unit
+         FROM inventory_assignments a
+         JOIN inventory_items i ON i.tenant_id = a.tenant_id AND i.id = a.item_id
+         WHERE ${filter}
+         ORDER BY a.issued_at DESC, a.created_at DESC
+         LIMIT $3 OFFSET $4`,
+        [options.status, options.search, options.pageSize, options.offset]
+      );
+      return { assignments: rows.rows, total: Number(count.rows[0]?.total ?? 0) };
+    }, auth.userId);
+    res.json({ ...result, page: options.page, pageSize: options.pageSize });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/inventory/assignments", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const input = inventoryAssignmentSchema.parse(req.body);
+    assertDateOnly(input.issuedAt);
+    if (input.dueDate) assertDateOnly(input.dueDate);
+    const assignmentId = await withTenantTransaction(
+      auth.tenantId,
+      (tx) => createInventoryAssignment(tx, auth, input),
+      auth.userId
+    );
+    res.status(201).json({ id: assignmentId, status: "active" });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      res.status(409).json({ error: "Phiếu cấp phát đã tồn tại." });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.post("/api/inventory/assignments/:assignmentId/return", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    await withTenantTransaction(
+      auth.tenantId,
+      (tx) => returnInventoryAssignment(tx, auth, uuidParam(req.params.assignmentId)),
+      auth.userId
+    );
+    res.json({ status: "returned" });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/inventory/template", authenticate, requireRoles("tenant_admin", "accountant"), async (_req, res, next) => {
+  try {
+    const buffer = await createInventoryWorkbook({ items: [], movements: [], assignments: [] });
+    res.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+      .set("Content-Disposition", 'attachment; filename="novabooks-inventory-template.xlsx"')
+      .send(buffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/inventory/export", authenticate, requireRoles("tenant_admin", "accountant"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const data = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const itemCount = await tx.query<{ total: string }>("SELECT count(*)::text AS total FROM inventory_items");
+      const movementCount = await tx.query<{ total: string }>("SELECT count(*)::text AS total FROM inventory_movements");
+      const assignmentCount = await tx.query<{ total: string }>("SELECT count(*)::text AS total FROM inventory_assignments");
+      if (Number(itemCount.rows[0]?.total) > 10_000 || Number(movementCount.rows[0]?.total) > 20_000
+          || Number(assignmentCount.rows[0]?.total) > 10_000) {
+        throw new HttpError(413, "Dữ liệu kho vượt giới hạn xuất Excel; hãy thu hẹp phạm vi dữ liệu trước.");
+      }
+      const items = await tx.query(
+        `SELECT i.code, i.name, i.category, i.unit, i.minimum_quantity::text,
+                i.location, i.notes, i.opening_quantity::text,
+                (i.opening_quantity + COALESCE(sum(
+                   CASE WHEN m.movement_type IN ('purchase_in', 'return_in', 'adjustment_in') THEN m.quantity
+                        ELSE -m.quantity END
+                 ), 0))::text AS current_quantity,
+                COALESCE(sum(CASE WHEN m.movement_type IN ('purchase_in', 'return_in', 'adjustment_in')
+                                  THEN m.quantity ELSE 0 END), 0)::text AS total_incoming,
+                COALESCE(sum(CASE WHEN m.movement_type IN ('production_out', 'issue_out', 'adjustment_out')
+                                  THEN m.quantity ELSE 0 END), 0)::text AS total_outgoing,
+                i.status,
+                CASE WHEN (i.opening_quantity + COALESCE(sum(
+                   CASE WHEN m.movement_type IN ('purchase_in', 'return_in', 'adjustment_in') THEN m.quantity
+                        ELSE -m.quantity END
+                 ), 0)) <= i.minimum_quantity THEN 'Cần nhập' ELSE 'Đủ tồn' END AS stock_status
+         FROM inventory_items i
+         LEFT JOIN inventory_movements m ON m.tenant_id = i.tenant_id AND m.item_id = i.id
+         GROUP BY i.tenant_id, i.id ORDER BY i.code`
+      );
+      const movements = await tx.query(
+        `SELECT m.movement_date::text AS date, m.document_number, m.movement_type AS type,
+                i.code AS item_code, i.name AS item_name, i.unit, m.quantity::text,
+                m.recipient, m.notes
+         FROM inventory_movements m
+         JOIN inventory_items i ON i.tenant_id = m.tenant_id AND i.id = m.item_id
+         ORDER BY m.movement_date, m.created_at`
+      );
+      const assignments = await tx.query(
+        `SELECT a.document_number, a.issued_at::text, a.recipient, a.team, i.code AS item_code,
+                a.quantity::text, a.condition, a.due_date::text, a.notes, a.status
+         FROM inventory_assignments a
+         JOIN inventory_items i ON i.tenant_id = a.tenant_id AND i.id = a.item_id
+         ORDER BY a.issued_at, a.created_at`
+      );
+      return { items: items.rows, movements: movements.rows, assignments: assignments.rows };
+    }, auth.userId);
+    const buffer = await createInventoryWorkbook({
+      items: data.items.map((row) => ({
+        code: row.code, name: row.name, category: row.category, unit: row.unit,
+        minimumQuantity: row.minimum_quantity, location: row.location, notes: row.notes,
+        openingQuantity: row.opening_quantity, currentQuantity: row.current_quantity,
+        totalIncoming: row.total_incoming, totalOutgoing: row.total_outgoing, status: row.stock_status
+      })),
+      movements: data.movements.map((row) => ({
+        date: row.date, documentNumber: row.document_number, type: row.type, itemCode: row.item_code,
+        itemName: row.item_name, unit: row.unit, quantity: row.quantity, recipient: row.recipient,
+        notes: row.notes, rowNumber: 0
+      })),
+      assignments: data.assignments.map((row) => ({
+        documentNumber: row.document_number, issuedAt: row.issued_at, recipient: row.recipient,
+        team: row.team, itemCode: row.item_code, quantity: row.quantity, condition: row.condition,
+        dueDate: row.due_date, notes: row.notes, status: row.status, rowNumber: 0
+      }))
+    });
+    res.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+      .set("Content-Disposition", 'attachment; filename="novabooks-inventory.xlsx"')
+      .send(buffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/inventory/import/preview", authenticate, requireRoles("tenant_admin", "accountant"), upload.single("inventory"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const file = parseInventoryUpload(req.file);
+    const { openingDate } = inventoryImportSchema.parse(req.body);
+    assertDateOnly(openingDate);
+    const parsed = await parseInventoryWorkbook(file.buffer);
+    const fileHash = createHash("sha256").update(file.buffer).digest();
+    const plan = await withTenantTransaction(
+      auth.tenantId,
+      (tx) => prepareInventoryImport(tx, auth.tenantId, parsed, openingDate, fileHash),
+      auth.userId
+    );
+    res.json({
+      canImport: !plan.errors.length && !plan.duplicateBatch,
+      duplicateBatch: plan.duplicateBatch,
+      itemCount: plan.newItems.length,
+      movementCount: plan.movements.length,
+      assignmentCount: plan.assignments.length,
+      skippedMovementCount: plan.skippedMovementCount,
+      skippedAssignmentCount: plan.skippedAssignmentCount,
+      warnings: plan.warnings,
+      errors: plan.errors
+    });
+  } catch (error) {
+    if (error instanceof InventoryWorkbookError) {
+      res.status(400).json({ error: error.message, details: error.details });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.post("/api/inventory/import", authenticate, requireRoles("tenant_admin", "accountant"), upload.single("inventory"), async (req, res, next) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth;
+    const file = parseInventoryUpload(req.file);
+    const { openingDate } = inventoryImportSchema.parse(req.body);
+    assertDateOnly(openingDate);
+    const parsed = await parseInventoryWorkbook(file.buffer);
+    const fileHash = createHash("sha256").update(file.buffer).digest();
+    const result = await withTenantTransaction(auth.tenantId, async (tx) => {
+      const plan = await prepareInventoryImport(tx, auth.tenantId, parsed, openingDate, fileHash);
+      if (plan.duplicateBatch) throw new HttpError(409, "Workbook này đã được nhập trước đó.");
+      if (plan.errors.length) throw new HttpError(422, plan.errors.slice(0, 10).join(" "));
+      const batch = await tx.query<{ id: string }>(
+        `INSERT INTO inventory_import_batches
+           (tenant_id, file_sha256, file_name, opening_date, item_count, movement_count,
+            assignment_count, imported_by_membership_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        [
+          auth.tenantId, fileHash, file.originalname.slice(0, 255), openingDate,
+          plan.newItems.length, plan.movements.length, plan.assignments.length, auth.membershipId
+        ]
+      );
+      const batchId = batch.rows[0]?.id;
+      if (!batchId) throw new Error("Inventory import batch insert returned no identifier");
+
+      for (const item of plan.newItems) {
+        await tx.query(
+          `INSERT INTO inventory_items
+             (tenant_id, code, name, category, unit, minimum_quantity, location, notes,
+              opening_quantity, opening_date)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [
+            auth.tenantId, item.code, item.name, item.category, item.unit, item.minimumQuantity,
+            item.location, item.notes, item.openingQuantity, openingDate
+          ]
+        );
+      }
+      const allItems = await tx.query<{ id: string; code: string }>(
+        "SELECT id, code FROM inventory_items WHERE tenant_id = $1 AND lower(code) = ANY($2::text[])",
+        [auth.tenantId, parsed.items.map((item) => normalizeInventoryCode(item.code))]
+      );
+      const itemIds = new Map(allItems.rows.map((item) => [normalizeInventoryCode(item.code), item.id]));
+      const assignmentIds = new Map<number, string>();
+      for (const assignment of plan.assignments) {
+        const inserted = await tx.query<{ id: string }>(
+          `INSERT INTO inventory_assignments
+             (tenant_id, item_id, document_number, issued_at, recipient, team, quantity,
+              condition, due_date, notes, status, source_kind, source_key, source_batch_id,
+              created_by_membership_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'workbook', $12, $13, $14)
+           RETURNING id`,
+          [
+            auth.tenantId, itemIds.get(normalizeInventoryCode(assignment.itemCode)),
+            assignment.documentNumber, assignment.issuedAt, assignment.recipient, assignment.team,
+            assignment.quantity, assignment.condition, assignment.dueDate, assignment.notes,
+            assignment.status, `workbook:${fileHash.toString("hex")}:assignment:${assignment.rowNumber}`,
+            batchId, auth.membershipId
+          ]
+        );
+        const assignmentId = inserted.rows[0]?.id;
+        if (!assignmentId) throw new Error("Inventory assignment insert returned no identifier");
+        assignmentIds.set(assignment.rowNumber, assignmentId);
+      }
+      for (const movement of plan.movements) {
+        const assignmentId = movement.assignmentRow === undefined
+          ? null
+          : assignmentIds.get(movement.assignmentRow) ?? null;
+        await tx.query(
+          `INSERT INTO inventory_movements
+             (tenant_id, item_id, movement_date, document_number, movement_type, quantity,
+              recipient, notes, source_kind, source_key, source_batch_id, source_assignment_id,
+              created_by_membership_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          [
+            auth.tenantId, itemIds.get(normalizeInventoryCode(movement.itemCode)), movement.date,
+            movement.documentNumber, movement.type, movement.quantity, movement.recipient,
+            movement.notes, assignmentId ? "assignment" : "workbook",
+            `workbook:${fileHash.toString("hex")}:${movement.assignmentRow === undefined ? "journal" : "assignment"}:${movement.rowNumber}`,
+            batchId, assignmentId, auth.membershipId
+          ]
+        );
+      }
+      await tx.query(
+        `INSERT INTO audit_logs (tenant_id, actor_user_id, action, resource_type, resource_id, details)
+         VALUES ($1, $2, 'inventory.workbook_imported', 'inventory_import_batch', $3, $4)`,
+        [auth.tenantId, auth.userId, batchId, JSON.stringify({
+          items: plan.newItems.length,
+          movements: plan.movements.length,
+          assignments: plan.assignments.length,
+          skippedMovements: plan.skippedMovementCount,
+          skippedAssignments: plan.skippedAssignmentCount
+        })]
+      );
+      return {
+        batchId,
+        itemCount: plan.newItems.length,
+        movementCount: plan.movements.length,
+        assignmentCount: plan.assignments.length,
+        skippedMovementCount: plan.skippedMovementCount,
+        skippedAssignmentCount: plan.skippedAssignmentCount
+      };
+    }, auth.userId);
+    res.status(201).json({ status: "imported", ...result });
+  } catch (error) {
+    if (error instanceof InventoryWorkbookError) {
+      res.status(400).json({ error: error.message, details: error.details });
+      return;
+    }
+    if (isUniqueViolation(error)) {
+      res.status(409).json({ error: "Workbook hoặc mã vật tư đã được nhập đồng thời; hãy tải lại dữ liệu." });
       return;
     }
     next(error);
@@ -1175,6 +1717,303 @@ async function parseLedgerUpload(file: Express.Multer.File | undefined) {
     throw new HttpError(415, "Chỉ hỗ trợ file Excel .xlsx. Hãy lưu workbook dưới định dạng Excel Workbook.");
   }
   return parseLedgerWorkbook(file.buffer);
+}
+
+function parseInventoryUpload(file: Express.Multer.File | undefined): Express.Multer.File {
+  if (!file) throw new HttpError(400, "Vui lòng chọn workbook quản lý kho.");
+  if (!/\.xlsx$/i.test(file.originalname)) {
+    throw new HttpError(415, "Chỉ hỗ trợ workbook Excel .xlsx.");
+  }
+  return file;
+}
+
+type PlannedInventoryMovement = {
+  date: string;
+  documentNumber: string;
+  type: InventoryMovementType;
+  itemCode: string;
+  quantity: string;
+  recipient: string | null;
+  notes: string | null;
+  rowNumber: number;
+  assignmentRow?: number;
+};
+
+type InventoryImportPlan = {
+  duplicateBatch: boolean;
+  newItems: InventoryCatalogEntry[];
+  movements: PlannedInventoryMovement[];
+  assignments: InventoryAssignmentInput[];
+  skippedMovementCount: number;
+  skippedAssignmentCount: number;
+  warnings: string[];
+  errors: string[];
+};
+
+async function prepareInventoryImport(
+  tx: import("./db").TenantTransaction,
+  tenantId: string,
+  workbook: ParsedInventoryWorkbook,
+  openingDate: string,
+  fileHash: Buffer
+): Promise<InventoryImportPlan> {
+  const batchResult = await tx.query(
+    "SELECT 1 FROM inventory_import_batches WHERE tenant_id = $1 AND file_sha256 = $2",
+    [tenantId, fileHash]
+  );
+  if (batchResult.rowCount) {
+    return {
+      duplicateBatch: true, newItems: [], movements: [], assignments: [],
+      skippedMovementCount: 0, skippedAssignmentCount: 0, warnings: [], errors: []
+    };
+  }
+
+  const itemCodes = workbook.items.map((item) => normalizeInventoryCode(item.code));
+  await tx.query(
+    `SELECT id FROM inventory_items
+     WHERE tenant_id = $1 AND lower(code) = ANY($2::text[])
+     ORDER BY id FOR UPDATE`,
+    [tenantId, itemCodes]
+  );
+  const itemRows = await tx.query<{
+    id: string;
+    code: string;
+    opening_quantity: string;
+    opening_date: string;
+    current_quantity: string;
+    latest_movement_date: string | null;
+    status: string;
+  }>(
+    `SELECT i.id, i.code, i.opening_quantity::text, i.opening_date::text, i.status,
+            (i.opening_quantity + COALESCE(sum(
+               CASE WHEN m.movement_type IN ('purchase_in', 'return_in', 'adjustment_in') THEN m.quantity
+                    ELSE -m.quantity END
+             ), 0))::text AS current_quantity,
+            max(m.movement_date)::text AS latest_movement_date
+     FROM inventory_items i
+     LEFT JOIN inventory_movements m ON m.tenant_id = i.tenant_id AND m.item_id = i.id
+     WHERE i.tenant_id = $1 AND lower(i.code) = ANY($2::text[])
+     GROUP BY i.tenant_id, i.id`,
+    [tenantId, itemCodes]
+  );
+  const existingByCode = new Map(itemRows.rows.map((row) => [normalizeInventoryCode(row.code), row]));
+  const newItems = workbook.items.filter((item) => !existingByCode.has(normalizeInventoryCode(item.code)));
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  if (workbook.items.length !== newItems.length) {
+    warnings.push(`${workbook.items.length - newItems.length} mã vật tư đã tồn tại; hệ thống giữ nguyên thông tin danh mục và số dư hiện có.`);
+  }
+
+  for (const movement of workbook.movements) {
+    const existing = existingByCode.get(normalizeInventoryCode(movement.itemCode));
+    if (existing?.status !== undefined && existing.status !== "active") {
+      errors.push(`Vật tư ${movement.itemCode} đã lưu trữ nhưng workbook còn giao dịch mới.`);
+    }
+  }
+  for (const assignment of workbook.assignments) {
+    const existing = existingByCode.get(normalizeInventoryCode(assignment.itemCode));
+    const startDate = existing?.opening_date ?? openingDate;
+    if (assignment.status === "active" && assignment.issuedAt >= startDate
+        && existing?.status !== undefined && existing.status !== "active") {
+      errors.push(`Vật tư ${assignment.itemCode} đã lưu trữ nhưng workbook còn cấp phát mới.`);
+    }
+    if (assignment.status === "returned" && assignment.issuedAt >= startDate) {
+      warnings.push(`Phiếu ${assignment.documentNumber} đã thu hồi nhưng sheet không có ngày thu hồi; hãy xác nhận Sổ Nhật Ký XNT có giao dịch thu hồi tương ứng.`);
+    }
+  }
+
+  const existingItemIds = itemRows.rows.map((row) => row.id);
+  const documentNumbers = [
+    ...workbook.movements.map((item) => item.documentNumber),
+    ...workbook.assignments.map((item) => item.documentNumber)
+  ].map((value) => value.trim().toLocaleLowerCase("vi-VN"));
+  const priorMovements = existingItemIds.length && documentNumbers.length
+    ? await tx.query<{
+        item_id: string;
+        movement_date: string;
+        document_number: string;
+        movement_type: InventoryMovementType;
+        quantity: string;
+      }>(
+        `SELECT item_id, movement_date::text, document_number, movement_type, quantity::text
+         FROM inventory_movements
+         WHERE tenant_id = $3 AND item_id = ANY($1::uuid[]) AND lower(document_number) = ANY($2::text[])`,
+        [existingItemIds, documentNumbers, tenantId]
+      )
+    : { rows: [] as Array<{
+        item_id: string; movement_date: string; document_number: string;
+        movement_type: InventoryMovementType; quantity: string;
+      }> };
+  const existingMovementKeys = new Set(priorMovements.rows.map((row) =>
+    movementIdentity(row.item_id, row.movement_date, row.document_number, row.movement_type, row.quantity)
+  ));
+  const plannedMovements: PlannedInventoryMovement[] = [];
+  const pendingMovementKeys = new Set<string>();
+  let skippedMovementCount = 0;
+  const addMovement = (
+    movement: PlannedInventoryMovement,
+    itemId: string | undefined
+  ): void => {
+    if (!itemId) {
+      errors.push(`Không tìm thấy mã vật tư ${movement.itemCode} khi chuẩn bị nhập workbook.`);
+      return;
+    }
+    const key = movementIdentity(itemId, movement.date, movement.documentNumber, movement.type, movement.quantity);
+    if (existingMovementKeys.has(key) || pendingMovementKeys.has(key)) {
+      skippedMovementCount += 1;
+      return;
+    }
+    const existing = existingByCode.get(normalizeInventoryCode(movement.itemCode));
+    const openingBalanceDate = existing?.opening_date ?? openingDate;
+    if (movement.date < openingBalanceDate) {
+      errors.push(`Phiếu ${movement.documentNumber}: ngày giao dịch ${movement.date} trước ngày tồn đầu kỳ ${openingBalanceDate} của ${movement.itemCode}.`);
+      return;
+    }
+    if (existing?.latest_movement_date && movement.date <= existing.latest_movement_date) {
+      errors.push(`Phiếu ${movement.documentNumber}: ngày ${movement.date} không sau giao dịch kho hiện có cuối cùng (${existing.latest_movement_date}) của ${movement.itemCode}.`);
+      return;
+    }
+    pendingMovementKeys.add(key);
+    plannedMovements.push(movement);
+  };
+  const itemIdByCode = new Map(itemRows.rows.map((row) => [normalizeInventoryCode(row.code), row.id]));
+  for (const item of newItems) {
+    itemIdByCode.set(normalizeInventoryCode(item.code), `new:${normalizeInventoryCode(item.code)}`);
+  }
+  for (const movement of workbook.movements) {
+    addMovement({
+      date: movement.date,
+      documentNumber: movement.documentNumber,
+      type: movement.type,
+      itemCode: movement.itemCode,
+      quantity: movement.quantity,
+      recipient: movement.recipient,
+      notes: movement.notes,
+      rowNumber: movement.rowNumber
+    }, itemIdByCode.get(normalizeInventoryCode(movement.itemCode)));
+  }
+
+  const priorAssignments = existingItemIds.length && documentNumbers.length
+    ? await tx.query<{
+        item_id: string;
+        document_number: string;
+        issued_at: string;
+        recipient: string;
+        quantity: string;
+      }>(
+        `SELECT item_id, document_number, issued_at::text, recipient, quantity::text
+         FROM inventory_assignments
+         WHERE tenant_id = $3 AND item_id = ANY($1::uuid[]) AND lower(document_number) = ANY($2::text[])`,
+        [existingItemIds, documentNumbers, tenantId]
+      )
+    : { rows: [] as Array<{
+        item_id: string; document_number: string; issued_at: string; recipient: string; quantity: string;
+      }> };
+  const assignmentIdentity = (
+    itemId: string, date: string, document: string, recipient: string, quantity: string
+  ) => [itemId, date, document.trim().toLocaleLowerCase("vi-VN"),
+    recipient.trim().toLocaleLowerCase("vi-VN"), decimalToUnits(quantity).toString()].join("|");
+  const priorAssignmentKeys = new Set(priorAssignments.rows.map((row) =>
+    assignmentIdentity(row.item_id, row.issued_at, row.document_number, row.recipient, row.quantity)
+  ));
+  const plannedAssignments: InventoryAssignmentInput[] = [];
+  const inFileAssignmentKeys = new Set<string>();
+  let skippedAssignmentCount = 0;
+  for (const assignment of workbook.assignments) {
+    const itemId = itemIdByCode.get(normalizeInventoryCode(assignment.itemCode));
+    if (!itemId) {
+      errors.push(`Không tìm thấy vật tư ${assignment.itemCode} cho phiếu cấp phát ${assignment.documentNumber}.`);
+      continue;
+    }
+    const key = assignmentIdentity(itemId, assignment.issuedAt, assignment.documentNumber, assignment.recipient, assignment.quantity);
+    if (priorAssignmentKeys.has(key) || inFileAssignmentKeys.has(key)) {
+      skippedAssignmentCount += 1;
+      continue;
+    }
+    inFileAssignmentKeys.add(key);
+    plannedAssignments.push(assignment);
+    if (assignment.status !== "active") continue;
+    const startDate = existingByCode.get(normalizeInventoryCode(assignment.itemCode))?.opening_date ?? openingDate;
+    if (assignment.issuedAt < startDate) continue;
+    const issueIdentity = movementIdentity(itemId, assignment.issuedAt, assignment.documentNumber, "issue_out", assignment.quantity);
+    if (existingMovementKeys.has(issueIdentity) || pendingMovementKeys.has(issueIdentity)) continue;
+    addMovement({
+      date: assignment.issuedAt,
+      documentNumber: assignment.documentNumber,
+      type: "issue_out",
+      itemCode: assignment.itemCode,
+      quantity: assignment.quantity,
+      recipient: assignment.recipient,
+      notes: assignment.notes ?? assignment.condition,
+      rowNumber: assignment.rowNumber,
+      assignmentRow: assignment.rowNumber
+    }, itemId);
+  }
+
+  const openingByItem = new Map<string, bigint>();
+  for (const item of workbook.items) {
+    const existing = existingByCode.get(normalizeInventoryCode(item.code));
+    openingByItem.set(
+      normalizeInventoryCode(item.code),
+      decimalToUnits(existing?.current_quantity ?? item.openingQuantity)
+    );
+  }
+  const movementsByItem = new Map<string, PlannedInventoryMovement[]>();
+  for (const movement of plannedMovements) {
+    const key = normalizeInventoryCode(movement.itemCode);
+    const rows = movementsByItem.get(key) ?? [];
+    rows.push(movement);
+    movementsByItem.set(key, rows);
+  }
+  for (const [itemCode, movements] of movementsByItem) {
+    movements.sort((left, right) => left.date.localeCompare(right.date) || left.rowNumber - right.rowNumber);
+    const index = firstNegativeStockMovement(unitsAsDecimal(openingByItem.get(itemCode) ?? 0n), movements);
+    if (index !== null) {
+      const movement = movements[index]!;
+      errors.push(`Phiếu ${movement.documentNumber}: tồn ${movement.itemCode} bị âm tại ${movement.date}; kiểm tra tồn đầu kỳ và nhật ký.`);
+    }
+  }
+  if (skippedMovementCount) warnings.push(`${skippedMovementCount} giao dịch đã tồn tại được bỏ qua để tránh cộng tồn hai lần.`);
+  if (skippedAssignmentCount) warnings.push(`${skippedAssignmentCount} phiếu cấp phát đã tồn tại được bỏ qua.`);
+  return {
+    duplicateBatch: false,
+    newItems,
+    movements: plannedMovements,
+    assignments: plannedAssignments,
+    skippedMovementCount,
+    skippedAssignmentCount,
+    warnings,
+    errors
+  };
+}
+
+function movementIdentity(
+  itemId: string,
+  date: string,
+  document: string,
+  type: InventoryMovementType,
+  quantity: string
+): string {
+  return [
+    itemId,
+    date,
+    document.trim().toLocaleLowerCase("vi-VN"),
+    type,
+    decimalToUnits(quantity).toString()
+  ].join("|");
+}
+
+function unitsAsDecimal(value: bigint): string {
+  const whole = value / 10_000n;
+  const fraction = (value % 10_000n).toString().padStart(4, "0").replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+
+function assertDateOnly(value: string): void {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.valueOf()) || date.toISOString().slice(0, 10) !== value) {
+    throw new HttpError(400, "Ngày không hợp lệ");
+  }
 }
 
 async function receiveTelegramDocument(

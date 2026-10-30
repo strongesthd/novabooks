@@ -9,6 +9,8 @@ import { config } from "./config";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
 import { voucherEditSchema } from "./validation";
+import { HttpError } from "./http-error";
+import { InventoryReviewLine, postVoucherInventory } from "./inventory-service";
 
 export async function createVoucherFromUpload(
   auth: AuthContext,
@@ -271,7 +273,9 @@ export async function reviewVoucher(
     expenseAccountCode: string;
     inputTaxAccountCode: string;
     payableAccountCode: string;
-  }
+    inventoryAccountCode?: string | null;
+  },
+  inventoryLines: InventoryReviewLine[] = []
 ): Promise<{ status: string }> {
   return withTenantTransaction(auth.tenantId, async (tx) => {
     const lock = await tx.query<{
@@ -282,8 +286,11 @@ export async function reviewVoucher(
       total_amount: string | null;
       currency: string | null;
       invoice_date: string | null;
+      invoice_number: string | null;
+      extracted_data: { lineItems?: Array<{ description?: string }> } | null;
     }>(
-      `SELECT id, status, subtotal::text, tax_amount::text, total_amount::text, currency, invoice_date
+      `SELECT id, status, subtotal::text, tax_amount::text, total_amount::text, currency,
+              invoice_date, invoice_number, extracted_data
        FROM temp_vouchers WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
       [auth.tenantId, voucherId]
     );
@@ -311,12 +318,31 @@ export async function reviewVoucher(
     if (total <= 0n) throw new HttpError(422, "Tổng tiền chứng từ phải lớn hơn 0");
     if (subtotal + tax !== total) throw new HttpError(422, "Tổng tiền không cân bằng với tiền trước thuế và thuế");
 
-    const mappingKeys = ["expense", "input_tax", "accounts_payable"] as const;
+    const extractedLines = Array.isArray(voucher.extracted_data?.lineItems)
+      ? voucher.extracted_data.lineItems
+      : [];
+    if (inventoryLines.some((line) => line.lineIndex >= extractedLines.length)) {
+      throw new HttpError(422, "Dòng vật tư được chọn không tồn tại trong kết quả OCR của chứng từ");
+    }
+    const inventoryAmount = inventoryLines.length
+      ? decimalToScale4(await postVoucherInventory(tx, auth, {
+          id: voucher.id,
+          invoiceNumber: voucher.invoice_number,
+          invoiceDate: voucher.invoice_date
+        }, inventoryLines))
+      : 0n;
+    if (inventoryAmount > subtotal) {
+      throw new HttpError(422, "Tổng thành tiền các dòng nhập kho không được vượt quá tiền hàng trên hóa đơn");
+    }
+    const expenseAmount = subtotal - inventoryAmount;
+
+    const mappingKeys = ["expense", "input_tax", "accounts_payable", "inventory_asset"] as const;
     const overrideCodes = accountMappingOverrides
       ? [
           accountMappingOverrides.expenseAccountCode,
           accountMappingOverrides.inputTaxAccountCode,
-          accountMappingOverrides.payableAccountCode
+          accountMappingOverrides.payableAccountCode,
+          accountMappingOverrides.inventoryAccountCode ?? ""
         ]
       : [];
     const accountMappings = accountMappingOverrides
@@ -347,10 +373,17 @@ export async function reviewVoucher(
     const expenseAccount = mapped.get("expense");
     const taxAccount = mapped.get("input_tax");
     const payableAccount = mapped.get("accounts_payable");
+    const inventoryAccount = mapped.get("inventory_asset");
     if (!expenseAccount || !payableAccount || (tax > 0n && !taxAccount)) {
       throw new HttpError(
         422,
         "Chưa cấu hình tài khoản định khoản. Hãy nhập sổ Excel và cấu hình tài khoản trong mục Sổ sách trước khi duyệt."
+      );
+    }
+    if (inventoryLines.length && !inventoryAccount) {
+      throw new HttpError(
+        422,
+        "Đã ghép hàng hóa với vật tư kho nhưng chưa cấu hình tài khoản Hàng tồn kho trong Sổ sách."
       );
     }
 
@@ -374,12 +407,23 @@ export async function reviewVoucher(
       ]
     );
     let lineNumber = 1;
-    if (subtotal > 0n) {
+    if (expenseAmount > 0n) {
       await tx.query(
         `INSERT INTO accounting_entry_lines
           (tenant_id, accounting_entry_id, line_number, account_code, account_name, debit)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [auth.tenantId, entryId, lineNumber++, expenseAccount.account_code, expenseAccount.account_name, voucher.subtotal]
+        [auth.tenantId, entryId, lineNumber++, expenseAccount.account_code, expenseAccount.account_name, unitsToAmount(expenseAmount)]
+      );
+    }
+    if (inventoryAmount > 0n && inventoryAccount) {
+      await tx.query(
+        `INSERT INTO accounting_entry_lines
+          (tenant_id, accounting_entry_id, line_number, account_code, account_name, debit)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          auth.tenantId, entryId, lineNumber++, inventoryAccount.account_code,
+          inventoryAccount.account_name, unitsToAmount(inventoryAmount)
+        ]
       );
     }
     if (tax > 0n) {
@@ -413,8 +457,15 @@ export async function reviewVoucher(
       accountMappings: {
         expense: expenseAccount.account_code,
         input_tax: tax > 0n ? taxAccount?.account_code : null,
-        accounts_payable: payableAccount.account_code
-      }
+        accounts_payable: payableAccount.account_code,
+        inventory_asset: inventoryLines.length ? inventoryAccount?.account_code : null
+      },
+      inventoryLines: inventoryLines.map((line) => ({
+        lineIndex: line.lineIndex,
+        itemId: line.itemId,
+        quantity: line.quantity,
+        amount: line.amount
+      }))
     });
     return { status: "posted" };
   }, auth.userId);
@@ -440,13 +491,19 @@ function toScale4(value: string): bigint {
   return BigInt(match[1]) * 10_000n + BigInt((match[2] ?? "").padEnd(4, "0") || "0");
 }
 
+function decimalToScale4(value: string): bigint {
+  const match = /^(\d+)(?:\.(\d{1,4}))?$/.exec(value);
+  if (!match?.[1]) throw new HttpError(422, "Giá trị dòng nhập kho không hợp lệ");
+  return BigInt(match[1]) * 10_000n + BigInt((match[2] ?? "").padEnd(4, "0") || "0");
+}
+
+function unitsToAmount(value: bigint): string {
+  const whole = value / 10_000n;
+  const fraction = (value % 10_000n).toString().padStart(4, "0").replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+
 function isValidDate(value: string): boolean {
   const date = new Date(`${value}T00:00:00.000Z`);
   return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
-}
-
-export class HttpError extends Error {
-  constructor(public readonly status: number, message: string) {
-    super(message);
-  }
 }

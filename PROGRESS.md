@@ -2,7 +2,7 @@
 
 ## 1. MỤC TIÊU HIỆN TẠI (Current Goal)
 - [x] Hoàn thiện source code MVP NovaBooks: backend TypeScript/PostgreSQL multi-tenant, xác thực/RBAC, chứng từ và duyệt, Telegram/Zalo, Gemini/TTS có cấu hình, dashboard web và kiểm thử.
-- [x] Hoàn thiện dialog, CRUD mềm, tìm kiếm/phân trang cho danh mục và sổ; kiểm thử và push lên GitHub.
+- [ ] Xây module kho theo workbook `Quan_Ly_Kho_va_Dung_Cu_Xuong.xlsx`: nhập danh mục/số dư/nhật ký, theo dõi tồn theo tenant, đối chiếu OCR và ghi phiếu nhập sau duyệt.
 
 ## 2. TIẾN ĐỘ THỰC HIỆN (Work Completed)
 - [x] Đọc `.ai/runs/copilot-instructions.md`, PROGRESS.md và tài liệu nghiệp vụ/schema hiện có.
@@ -68,6 +68,24 @@
 - [ ] Khắc phục bước xác minh HTTPS/vhost trong deploy: workflow chạy migration và khởi động app, nhưng verification thất bại, deploy rollback cấu hình Nginx; kiểm tra route/domain/SNI trên VPS trước khi chạy lại.
 - [ ] Xác nhận migrations 006-007 đã được đăng ký trên PostgreSQL deploy và kiểm tra API end-to-end.
 - [ ] Nếu doanh nghiệp có workbook khác template NovaBooks, lấy file đã ẩn dữ liệu nhạy cảm để bổ sung mapping cột.
+- [ ] Task hiện tại: triển khai API/UI kho, ghép vật tư OCR khi duyệt, kiểm thử và cập nhật README.
+
+### Lượt triển khai module kho
+- [x] Đọc hướng dẫn `.ai/runs/copilot-instructions.md`, giữ nguyên workbook mẫu đang có trong worktree và xác nhận luồng Nợ/Có không phù hợp cho nhật ký nhập-xuất-tồn.
+- [x] Tạo parser workbook riêng, hỗ trợ danh mục, số dư đầu kỳ, nhật ký XNT và cấp phát dụng cụ; từ chối công thức/ô dữ liệu không hợp lệ.
+- [x] Tạo migration kho tenant-scoped với RLS, chỉ mục, chống nhập/ghi trùng và quyền append-only cho giao dịch.
+- [x] Thêm API danh mục/tồn kho/giao dịch/cấp phát, import-preview/import có chống nhập trùng và xuất workbook 5 sheet; các thao tác ghi tồn chạy trong transaction tenant.
+- [x] Khi duyệt OCR, dòng chỉ vào kho sau khi người duyệt ghép vật tư; movement, bút toán Hàng tồn kho và duyệt voucher cùng transaction.
+- [x] Build TypeScript thành công sau các thay đổi parser, API và service.
+- [x] Hoàn thiện UI danh mục/tồn kho, giao dịch, cấp phát/thu hồi, import preview/import, export/template; thêm ghép dòng OCR và mapping tài khoản hàng tồn kho.
+- [x] Thêm test cho workbook 5 sheet, round-trip export/import, công thức thiếu cached result, giao dịch không hỗ trợ và validation số lượng.
+- [x] Kiểm thử parser trực tiếp trên file `Quan_Ly_Kho_va_Dung_Cu_Xuong.xlsx`: nhận 8 vật tư, 5 giao dịch và 4 phiếu cấp phát.
+- [x] Thêm kiểm tra fixed-point để không ghi xuất làm tồn âm; chặn sửa số dư đầu kỳ, ghi xuất/cấp phát lùi ngày và lưu trữ vật tư còn tồn/cấp phát mở.
+- [x] `npm test` pass (10/10), `node --check public/app.js`, `git diff --check` và `npm audit --audit-level=moderate` đều pass (0 lỗ hổng).
+- [x] Kiểm tra trình duyệt cho trang đăng nhập/điều hướng; parser đã chạy trực tiếp trên workbook mẫu.
+- [ ] Tiếp theo: áp dụng migration 008 và chạy API/RLS integration test khi có PostgreSQL; hiện `psql` không cài và Docker daemon không phản hồi trong phiên này.
+
+**Files thay đổi trong lượt triển khai kho:** `src/inventory.ts`, `src/inventory-service.ts`, `src/http-error.ts`, `src/server.ts`, `src/vouchers.ts`, `src/validation.ts`, `database/migrations/008_tenant_inventory.sql`, `public/index.html`, `public/app.js`, `public/styles.css`, `tests/core.test.cjs`, `README.md`, `PROGRESS.md`.
 
 ## 5. LƯU Ý KỸ THUẬT & LỖI CẦN TRÁNH (Notes & Blockers)
 - Docker Desktop hiện ở trạng thái `paused`; `docker compose up -d` không thể khởi động DB nên migration/API chưa được chạy thực tế.

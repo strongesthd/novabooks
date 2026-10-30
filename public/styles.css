@@ -103,7 +103,8 @@ input::placeholder { color: #a7b0aa; }
 .page-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 15px; margin-bottom: 25px; }
 .page-heading h1 { font: 700 25px Manrope, sans-serif; letter-spacing: -.8px; margin: 0 0 6px; }
 .page-heading p { margin: 0; color: var(--muted); font-size: 12px; }
-.heading-actions { display: flex; gap: 9px; align-items: center; }
+.heading-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 9px; align-items: center; }
+.inventory-panel { margin-bottom: 15px; }
 .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 13px; margin-bottom: 20px; }
 .metric-card, .panel, .voucher-card { background: #fff; border: 1px solid var(--line); border-radius: 8px; }
 .metric-card { padding: 16px 17px; }
@@ -124,7 +125,7 @@ td { padding: 12px 15px; border-top: 1px solid #f0f2f0; color: #536159; font-siz
 td strong { color: #2a3931; font-weight: 600; }
 .status { display: inline-flex; align-items: center; gap: 5px; border-radius: 20px; padding: 4px 8px; color: #8b691f; background: #fbf3de; font-size: 9px; }
 .status::before { content: ""; width: 5px; height: 5px; background: currentColor; border-radius: 50%; }
-.status-posted, .status-active { color: #278057; background: #eaf5ee; }
+.status-posted, .status-active, .status-in_stock { color: #278057; background: #eaf5ee; }
 .status-archived { color: #6d7771; background: #eef0ee; }
 .status-rejected, .status-failed, .status-error { color: #b84d49; background: #fff0ef; }
 .status-received, .status-extracting { color: #657693; background: #eff3f9; }
@@ -196,8 +197,8 @@ td strong { color: #2a3931; font-weight: 600; }
   .app-shell { display: block; padding-bottom: 62px; }
   .sidebar { height: auto; min-height: 0; position: fixed; z-index: 4; left: 0; right: 0; bottom: 0; top: auto; padding: 5px 8px max(5px, env(safe-area-inset-bottom)); border: 0; border-top: 1px solid var(--line); }
   .sidebar > .brand, .tenant-switcher, .nav-caption, .sidebar-bottom { display: none; }
-  .main-nav { flex-direction: row; justify-content: space-around; gap: 2px; }
-  .nav-item { height: 49px; width: auto; padding: 4px 7px; display: grid; justify-items: center; align-content: center; gap: 1px; font-size: 8px; position: relative; }
+  .main-nav { flex-direction: row; justify-content: flex-start; gap: 2px; overflow-x: auto; }
+  .nav-item { height: 49px; width: auto; min-width: 52px; flex: 0 0 52px; padding: 4px 5px; display: grid; justify-items: center; align-content: center; gap: 1px; font-size: 8px; position: relative; }
   .nav-icon { font-size: 15px; }
   .nav-badge { position: absolute; top: 0; right: 0; }
   .topbar { height: 52px; padding: 0 17px; }
