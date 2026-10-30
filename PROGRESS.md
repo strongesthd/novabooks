@@ -84,6 +84,7 @@
 - [x] `npm test` pass (10/10), `node --check public/app.js`, `git diff --check` và `npm audit --audit-level=moderate` đều pass (0 lỗ hổng).
 - [x] Kiểm tra trình duyệt cho trang đăng nhập/điều hướng; parser đã chạy trực tiếp trên workbook mẫu.
 - [ ] Tiếp theo: áp dụng migration 008 và chạy API/RLS integration test khi có PostgreSQL; hiện `psql` không cài và Docker daemon không phản hồi trong phiên này.
+- [x] Commit `bc94c40` đã push lên `main`; GitHub CI thành công. Workflow deploy production `41066731477` đang chạy, chưa xác nhận deploy hoàn tất.
 
 **Files thay đổi trong lượt triển khai kho:** `src/inventory.ts`, `src/inventory-service.ts`, `src/http-error.ts`, `src/server.ts`, `src/vouchers.ts`, `src/validation.ts`, `database/migrations/008_tenant_inventory.sql`, `public/index.html`, `public/app.js`, `public/styles.css`, `tests/core.test.cjs`, `README.md`, `PROGRESS.md`.
 
