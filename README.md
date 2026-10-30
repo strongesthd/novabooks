@@ -53,11 +53,11 @@ Workflow `.github/workflows/deploy.yml` triển khai khi push vào `main` hoặc
 - Tạo `/home/app/novabooks/.env` từ [`deploy/production.env.example`](./deploy/production.env.example), sinh `DB_ADMIN_PASSWORD`, `DB_PASSWORD` (khác nhau, chỉ gồm ký tự URL-safe), `JWT_SECRET` (ít nhất 32 ký tự ngẫu nhiên) và `ENCRYPTION_KEY` (32 byte biểu diễn bằng 64 ký tự hex). Đặt quyền `chmod 600` và owner phù hợp. Không commit file này.
 - Tạo `/var/www/certbot` và thư mục `/etc/letsencrypt/renewal-hooks/deploy`.
 - Bảo đảm `app` có thể chạy Docker và các lệnh Nginx/Certbot không tương tác. Cấu hình `sudoers` có giới hạn cho `install`, `cp`, `rm`, `ln`, `nginx -t`, `systemctl reload nginx`, `certbot certonly` và `mkdir`; không cấp `NOPASSWD: ALL`.
-- Ghi lại SSH host fingerprint của VPS để xác minh kết nối trong CI.
+- (Tùy chọn) Cấu hình SSH host fingerprint để xác minh máy chủ trong CI.
 
 ### GitHub Actions secrets
 
-Trong repository, tạo environment **`novabooks-production`** và các secrets:
+Trong repository, tạo environment **`novabooks-production`** và thêm 4 secrets bắt buộc:
 
 | Secret | Giá trị |
 |---|---|
@@ -65,10 +65,8 @@ Trong repository, tạo environment **`novabooks-production`** và các secrets:
 | `VPS_USER` | User SSH deploy (thường là `app`) |
 | `VPS_SSH_PORT` | Cổng SSH |
 | `VPS_SSH_KEY` | Private key SSH của deploy user |
-| `VPS_FINGERPRINT` | SSH host fingerprint SHA-256 |
-| `LETSENCRYPT_EMAIL` | Email thông báo chứng thư |
 
-Reviewers/branch protection có thể cấu hình trong GitHub Environment. Secrets trên không được đặt trong YAML, commit hay application `.env`.
+`VPS_FINGERPRINT` là secret tùy chọn để pin SSH host fingerprint. `LETSENCRYPT_EMAIL` là GitHub Environment variable tùy chọn (không phải secret); nếu không đặt, Certbot vẫn cấp chứng thư nhưng không có email nhắc gia hạn. Reviewers/branch protection có thể cấu hình trong GitHub Environment. Không đặt SSH secrets trong YAML, commit hay application `.env`.
 
 ### Kiểm tra sau khi cấu hình
 
