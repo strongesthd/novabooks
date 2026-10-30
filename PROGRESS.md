@@ -32,6 +32,7 @@
 - [x] GitHub CI pass; deploy workflow dừng trước khi kết nối VPS do thiếu secrets `novabooks-production` (bắt đầu từ `VPS_HOST`).
 - [x] Xác nhận `novabooks.novatechhp.vn` hiện đang phục vụ giao diện Twenty CRM; không tự ghi đè site hiện có khi chưa xác nhận cutover.
 - [x] Điều chỉnh deploy workflow: chỉ 4 secrets SSH là bắt buộc; SSH fingerprint và email Certbot chuyển thành tùy chọn, đồng bộ README.
+- [ ] Gỡ hẳn tham chiếu SSH fingerprint khỏi action inputs; lần thất bại gần nhất là chạy lại attempt của workflow cũ (commit `62ec82b`), chưa dùng phiên bản mới trên `main`.
 - [ ] Khởi động PostgreSQL/Docker, chạy migration và kiểm tra API end-to-end.
 - [ ] Docker Desktop hiện đang paused; cần tiếp tục kiểm tra DB khi daemon hoạt động.
 
@@ -51,7 +52,7 @@
 - `.ai/runs/copilot-instructions.md` đã đọc; cập nhật trạng thái và handover tại `PROGRESS.md`.
 
 ## 4. BƯỚC TIẾP THEO CẦN LÀM NGAY (Next Immediate Steps)
-- [ ] Chạy CI/deploy sau khi 4 secrets được thêm vào đúng Environment; cần hostname/domain đã được xác nhận trước cutover.
+- [ ] Chạy workflow phiên bản mới trên `main` sau khi xác nhận hostname production; deploy target hiện vẫn là `novabooks.novatechhp.vn`.
 - [ ] Chạy lại workflow deploy sau khi có quyền truy cập VPS; kiểm tra NovaBooks health/dashboard HTTPS.
 - [ ] Kiểm tra live health/dashboard, migrations và API trên domain.
 
@@ -64,4 +65,4 @@
 - Worker trích xuất hiện là in-process, chưa có queue/outbox bền vững; cần thay trước production. Zalo webhook signature/header cần xác nhận với phiên bản API thực tế.
 - GitHub branch `main` đã nhận source; workflow cần 4 secrets: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `VPS_SSH_PORT`. `VPS_FINGERPRINT` tùy chọn; `LETSENCRYPT_EMAIL` là variable tùy chọn.
 - DNS trả về Cloudflare proxy addresses; trang hiện tại là Twenty CRM. Deploy workflow sẽ thay cấu hình Nginx cùng hostname, nên cần chủ sở hữu xác nhận trước khi cutover.
-- GitHub Actions deploy cần 4 SSH secrets trong `novabooks-production`; pin fingerprint và email Certbot là tùy chọn. VPS cần DNS trỏ domain, Docker, Nginx, Certbot, thư mục ACME và sudoers giới hạn.
+- Workflow run failure shown by user is attempt 3 of old commit `62ec82b`; latest workflow must be dispatched from `main`. Four SSH secrets are required; Certbot email variable optional.

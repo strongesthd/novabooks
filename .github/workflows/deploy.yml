@@ -77,7 +77,6 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_SSH_PORT }}
-          fingerprint: ${{ secrets.VPS_FINGERPRINT }}
           source: novabooks-deploy.tgz
           target: /tmp/novabooks-upload-${{ github.run_id }}
           rm: true
@@ -96,7 +95,6 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_SSH_PORT }}
-          fingerprint: ${{ secrets.VPS_FINGERPRINT }}
           envs: RUN_ID,RUN_ATTEMPT,LETSENCRYPT_EMAIL
           script_stop: true
           command_timeout: 30m
