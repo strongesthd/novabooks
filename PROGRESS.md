@@ -2,7 +2,7 @@
 
 ## 1. MỤC TIÊU HIỆN TẠI (Current Goal)
 - [x] Hoàn thiện source code MVP NovaBooks: backend TypeScript/PostgreSQL multi-tenant, xác thực/RBAC, chứng từ và duyệt, Telegram/Zalo, Gemini/TTS có cấu hình, dashboard web và kiểm thử.
-- [ ] Hoàn thiện dialog, CRUD mềm, tìm kiếm/phân trang cho danh mục và sổ; kiểm thử rồi push toàn bộ thay đổi đang chờ lên GitHub.
+- [x] Hoàn thiện dialog, CRUD mềm, tìm kiếm/phân trang cho danh mục và sổ; kiểm thử và push lên GitHub.
 
 ## 2. TIẾN ĐỘ THỰC HIỆN (Work Completed)
 - [x] Đọc `.ai/runs/copilot-instructions.md`, PROGRESS.md và tài liệu nghiệp vụ/schema hiện có.
@@ -42,6 +42,7 @@
 - [x] Bổ sung sửa/lưu trữ/khôi phục nhà cung cấp và hàng hóa; API có tenant scoping, audit log, tìm kiếm, lọc trạng thái và phân trang server-side.
 - [x] Bổ sung phân trang/tìm kiếm sổ; thay sửa/xóa bút toán đã hạch toán bằng bút toán đảo bất biến có liên kết duy nhất/audit, giữ nguyên bản gốc.
 - [x] Thêm test cho dữ liệu cập nhật tùy chọn/nullable; cú pháp frontend, build/typecheck, 7 tests, audit dependency và diff check đều pass.
+- [x] Commit `bd09769` và push thành công lên `origin/main`.
 - [ ] Gỡ hẳn tham chiếu SSH fingerprint khỏi action inputs; lần thất bại gần nhất là chạy lại attempt của workflow cũ (commit `62ec82b`), chưa dùng phiên bản mới trên `main`.
 - [ ] Khởi động PostgreSQL/Docker, chạy migration và kiểm tra API end-to-end.
 - [ ] Docker Desktop hiện đang paused; cần tiếp tục kiểm tra DB khi daemon hoạt động.
@@ -63,9 +64,8 @@
 - `.ai/runs/copilot-instructions.md` đã đọc; cập nhật trạng thái và handover tại `PROGRESS.md`.
 
 ## 4. BƯỚC TIẾP THEO CẦN LÀM NGAY (Next Immediate Steps)
-- [ ] Chạy syntax/typecheck/tests/audit/build và kiểm tra diff.
-- [ ] Commit các thay đổi yêu cầu và push branch `main` lên `origin`.
-- [ ] Sau khi deploy, áp dụng migrations 006-007; kiểm tra API trên PostgreSQL thật khi Docker hoạt động.
+- [ ] Theo dõi GitHub Actions sau commit `bd09769`; deploy chỉ tiếp tục nếu đủ 4 secrets trong environment `novabooks-production`.
+- [ ] Xác nhận migrations 006-007 đã chạy trên PostgreSQL deploy và kiểm tra API end-to-end.
 - [ ] Nếu doanh nghiệp có workbook khác template NovaBooks, lấy file đã ẩn dữ liệu nhạy cảm để bổ sung mapping cột.
 
 ## 5. LƯU Ý KỸ THUẬT & LỖI CẦN TRÁNH (Notes & Blockers)
