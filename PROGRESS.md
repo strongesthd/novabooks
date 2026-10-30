@@ -2,7 +2,7 @@
 
 ## 1. MỤC TIÊU HIỆN TẠI (Current Goal)
 - [x] Hoàn thiện source code MVP NovaBooks: backend TypeScript/PostgreSQL multi-tenant, xác thực/RBAC, chứng từ và duyệt, Telegram/Zalo, Gemini/TTS có cấu hình, dashboard web và kiểm thử.
-- [ ] Push commit NovaBooks lên `main` của `strongesthd/novabooks`; hoàn tất cài đặt VPS/DNS/secrets trước khi kỳ vọng deploy production.
+- [ ] Xác nhận domain đích an toàn để cutover, cấu hình secrets production và chạy deploy NovaBooks.
 
 ## 2. TIẾN ĐỘ THỰC HIỆN (Work Completed)
 - [x] Đọc `.ai/runs/copilot-instructions.md`, PROGRESS.md và tài liệu nghiệp vụ/schema hiện có.
@@ -28,7 +28,9 @@
 - [x] Thêm production Docker image/Compose, PostgreSQL runtime role, migration runner có tracking/advisory lock và health checks.
 - [x] Thêm GitHub Actions CI/deploy, Nginx reverse proxy/HTTPS bootstrap và chứng thư Let's Encrypt cho domain NovaBooks.
 - [x] Kiểm tra typecheck, build/test (5/5), cú pháp frontend, audit dependencies và Compose local/production với env mẫu.
-- [x] Khởi tạo Git branch `main`, loại `.ai`/secrets khỏi source publish và tạo commit `6a69ec5`; GitHub xác nhận repository `strongesthd/novabooks` chưa có commit.
+- [x] Khởi tạo Git branch `main`, loại `.ai`/secrets khỏi source publish; push source và handover commits lên `strongesthd/novabooks`.
+- [x] GitHub CI pass; deploy workflow dừng trước khi kết nối VPS do thiếu secrets `novabooks-production` (bắt đầu từ `VPS_HOST`).
+- [x] Xác nhận `novabooks.novatechhp.vn` hiện đang phục vụ giao diện Twenty CRM; không tự ghi đè site hiện có khi chưa xác nhận cutover.
 - [ ] Khởi động PostgreSQL/Docker, chạy migration và kiểm tra API end-to-end.
 - [ ] Docker Desktop hiện đang paused; cần tiếp tục kiểm tra DB khi daemon hoạt động.
 
@@ -48,8 +50,8 @@
 - `.ai/runs/copilot-instructions.md` đã đọc; cập nhật trạng thái và handover tại `PROGRESS.md`.
 
 ## 4. BƯỚC TIẾP THEO CẦN LÀM NGAY (Next Immediate Steps)
-- [ ] Cấu hình remote, push `main`, xác nhận commit và trạng thái GitHub Actions.
-- [ ] Cấu hình DNS A/AAAA, GitHub environment secrets, VPS `.env`, nginx/certbot và chạy deploy workflow.
+- [ ] Nhận xác nhận giữ/thay site Twenty CRM; cấu hình GitHub Environment `novabooks-production` secrets và VPS prerequisites.
+- [ ] Chạy lại workflow deploy sau khi có quyền truy cập VPS; kiểm tra NovaBooks health/dashboard HTTPS.
 - [ ] Kiểm tra live health/dashboard, migrations và API trên domain.
 
 ## 5. LƯU Ý KỸ THUẬT & LỖI CẦN TRÁNH (Notes & Blockers)
@@ -59,5 +61,6 @@
 - Không thể gửi Telegram/Zalo/TTS thật hoặc gọi Gemini nếu chưa có credentials; tích hợp phải fail rõ ràng, không giả lập thành công.
 - Giữ RLS, transaction-scoped tenant context và membership authorization; không dựa riêng vào WHERE ở repository.
 - Worker trích xuất hiện là in-process, chưa có queue/outbox bền vững; cần thay trước production. Zalo webhook signature/header cần xác nhận với phiên bản API thực tế.
-- Repo đích GitHub đang rỗng; Git local đã có commit `6a69ec5`, chưa cấu hình remote/push. DNS trả về Cloudflare proxy addresses; cần xác nhận origin VPS riêng.
+- GitHub branch `main` đã nhận source; CI pass, deploy cần secrets `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `VPS_SSH_PORT`, `VPS_FINGERPRINT`, `LETSENCRYPT_EMAIL`.
+- DNS trả về Cloudflare proxy addresses; trang hiện tại là Twenty CRM. Deploy workflow sẽ thay cấu hình Nginx cùng hostname, nên cần chủ sở hữu xác nhận trước khi cutover.
 - GitHub Actions deploy cần Environment `novabooks-production` và secrets VPS/SSH fingerprint/Let's Encrypt; VPS cần DNS trỏ domain, Docker, Nginx, Certbot, thư mục ACME và sudoers giới hạn.
