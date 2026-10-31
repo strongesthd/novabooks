@@ -83,10 +83,12 @@
 - [x] Kiểm tra public HTTP trả 301 từ Cloudflare; `books.novatechhp.vn` dashboard 404, `novabooks.novatechhp.vn` vẫn HTTP 200.
 - [x] Chủ sở hữu báo đã chuyển `books.novatechhp.vn` sang DNS-only; kiểm tra độc lập qua 8.8.8.8 và 1.1.1.1 vẫn thấy A/AAAA Cloudflare, HTTP còn 301.
 - [x] Sau khi chủ sở hữu xác nhận lại DNS-only, truy vấn mới vẫn trả Cloudflare proxy IP (TTL 300) và HTTP 301; thay đổi chưa thấy ở DNS công khai.
-- [ ] Không chạy lại deploy đến khi resolver công khai trả origin VPS cho `books` và challenge path không còn bị Cloudflare chuyển hướng.
+- [x] Chủ sở hữu chọn giữ Cloudflare proxy; cấu hình ACME đã được trao đổi, public probe lúc đó vẫn nhận 301. Trạng thái này được cập nhật sau bởi xác nhận deploy thành công của chủ sở hữu.
+- [x] Chủ sở hữu xác nhận VPS đã deploy thành công và ứng dụng đang chạy trên commit mới nhất; các log deploy thất bại trước đó đã lỗi thời, không tiếp tục thao tác DNS/vhost.
 - [ ] Chạy API/RLS end-to-end test khi có PostgreSQL local; migration runner production báo schema đã up to date.
 - [ ] Nếu doanh nghiệp có workbook khác template NovaBooks, lấy file đã ẩn dữ liệu nhạy cảm để bổ sung mapping cột.
-- [ ] Task hiện tại: kiểm thử và triển khai NovaBooks lên hostname riêng `books.novatechhp.vn`, không ảnh hưởng site hiện tại.
+- [x] Module kho theo workbook đã triển khai, kiểm thử và push trong commit `bc94c40`; không còn thay đổi tính năng đang chờ commit.
+- [ ] Task hiện tại: chờ yêu cầu tiếp theo; không chạy deploy hoặc thay đổi DNS.
 
 ### Lượt cấu hình hostname production riêng
 - [x] Đọc `.ai/runs/copilot-instructions.md`, giữ nguyên workbook untracked của người dùng.
@@ -106,7 +108,9 @@
 - [x] Run `41174242440` CI pass nhưng Certbot HTTP-01 thất bại: Cloudflare trả HTTP 301 sang HTTPS và challenge nhận 404. Vhost cũ vẫn phục vụ.
 - [x] Chủ sở hữu yêu cầu chạy lại sau khi đổi DNS-only; hai resolver công khai vẫn trả Cloudflare proxy IP nên chưa chạy lại để tránh lặp lỗi ACME.
 - [x] Chủ sở hữu xác nhận lần nữa đã sửa; lần kiểm tra tiếp theo vẫn thấy Cloudflare A/AAAA và HTTP redirect, chưa an toàn để trigger deploy.
-- [ ] Chờ public DNS trả origin IP và xác nhận challenge route; sau đó trigger deploy và xác minh health endpoint.
+- [x] Chủ sở hữu chọn giữ proxy và cấu hình ngoại lệ Cloudflare cho ACME; lần probe tại thời điểm đó vẫn nhận redirect.
+- [x] Chủ sở hữu xác nhận deploy thành công trên VPS; dừng theo đuổi các lỗi ACME/DNS từ các run lịch sử.
+- [x] Module kho đã được push và kiểm thử; workbook Excel là import/export, PostgreSQL tenant-scoped là dữ liệu chính. OCR chỉ cập nhật kho sau khi kế toán ghép dòng và duyệt.
 
 ### Lượt triển khai module kho
 - [x] Đọc hướng dẫn `.ai/runs/copilot-instructions.md`, giữ nguyên workbook mẫu đang có trong worktree và xác nhận luồng Nợ/Có không phù hợp cho nhật ký nhập-xuất-tồn.
