@@ -76,7 +76,9 @@
 - [x] Run `41173151625` xác định deploy fail vì trùng upstream `novabooks_app` với Nginx vhost hiện có; rollback giữ nguyên site CRM.
 - [x] Đặt tên upstream Nginx riêng theo `APP_DOMAIN`; cú pháp Bash, production Compose, render template và diff check đều pass.
 - [x] Run `41173358712` qua CI; deploy vẫn lỗi sau khi `nginx -t` thành công và chưa có chẩn đoán bước cụ thể. `books.novatechhp.vn` vẫn chưa phục vụ NovaBooks.
-- [ ] Bổ sung log theo từng bước và guard cấm deploy vào hostname CRM hiện tại; kiểm thử, push và xác minh deploy tiếp theo.
+- [x] Run `41173634570` ghi nhận bootstrap Nginx được nạp; tiến trình dừng trước khi ghi log xin chứng thư, chưa rõ nguyên nhân.
+- [x] Bổ sung log từng stage, guard cấm hostname CRM và gom lựa chọn email Certbot bằng Bash `case`.
+- [ ] Kiểm tra cú pháp, push sửa đổi và xác minh deploy tiếp theo.
 - [ ] Chạy API/RLS end-to-end test khi có PostgreSQL local; migration runner production báo schema đã up to date.
 - [ ] Nếu doanh nghiệp có workbook khác template NovaBooks, lấy file đã ẩn dữ liệu nhạy cảm để bổ sung mapping cột.
 - [ ] Task hiện tại: kiểm thử và triển khai NovaBooks lên hostname riêng `books.novatechhp.vn`, không ảnh hưởng site hiện tại.
@@ -93,7 +95,9 @@
 - [x] Log deploy xác nhận Nginx lỗi duplicate upstream từ site `novabooks.novatechhp.vn`; site cũ vẫn nguyên trạng.
 - [x] Tạo upstream duy nhất theo hostname; Bash syntax, Compose config, template render và whitespace checks pass.
 - [x] Run `41173358712` có `nginx -t` thành công nhưng thoát lỗi trước khi log trạng thái xác minh; domain mới vẫn trả 404.
-- [ ] Bổ sung thông báo stage/reload rõ ràng và chặn tuyệt đối hostname `novabooks.novatechhp.vn`; push bản sửa, xác minh health endpoint hostname mới.
+- [x] Run `41173634570` kích hoạt bootstrap vhost `books.novatechhp.vn` nhưng dừng trước bước xin cert; site cũ không bị ghi đè.
+- [x] Bổ sung diagnostics, chặn hostname cũ và đơn giản hóa lựa chọn email Certbot.
+- [ ] Kiểm tra/push sửa đổi và xác minh health endpoint hostname mới.
 
 ### Lượt triển khai module kho
 - [x] Đọc hướng dẫn `.ai/runs/copilot-instructions.md`, giữ nguyên workbook mẫu đang có trong worktree và xác nhận luồng Nợ/Có không phù hợp cho nhật ký nhập-xuất-tồn.

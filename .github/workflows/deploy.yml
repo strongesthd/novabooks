@@ -208,23 +208,23 @@ jobs:
                 exit 1
               fi
               echo "Bootstrap Nginx vhost is active for $APP_DOMAIN"
-              if [ -n "${LETSENCRYPT_EMAIL:-}" ]; then
-                echo "Requesting Let's Encrypt certificate for $APP_DOMAIN"
-                if ! sudo -n certbot certonly --webroot --webroot-path /var/www/certbot \
-                  --non-interactive --agree-tos --email "$LETSENCRYPT_EMAIL" \
-                  -d "$APP_DOMAIN"; then
-                  restore_nginx
-                  exit 1
-                fi
-              else
-                echo "Requesting Let's Encrypt certificate for $APP_DOMAIN"
-                if ! sudo -n certbot certonly --webroot --webroot-path /var/www/certbot \
-                  --non-interactive --agree-tos --register-unsafely-without-email \
-                  -d "$APP_DOMAIN"; then
-                  restore_nginx
-                  exit 1
-                fi
+              case "${LETSENCRYPT_EMAIL:-}" in
+                "")
+                  CERTBOT_CONTACT_ARGS=(--register-unsafely-without-email)
+                  ;;
+                *)
+                  CERTBOT_CONTACT_ARGS=(--email "$LETSENCRYPT_EMAIL")
+                  ;;
+              esac
+              echo "Requesting Let's Encrypt certificate for $APP_DOMAIN"
+              if ! sudo -n certbot certonly --webroot --webroot-path /var/www/certbot \
+                --non-interactive --agree-tos "${CERTBOT_CONTACT_ARGS[@]}" \
+                -d "$APP_DOMAIN"; then
+                echo "Let's Encrypt certificate request failed for $APP_DOMAIN"
+                restore_nginx
+                exit 1
               fi
+              echo "Let's Encrypt certificate issued for $APP_DOMAIN"
             fi
 
             sed -e "s/__APP_DOMAIN__/$APP_DOMAIN/g" -e "s/__APP_UPSTREAM__/$APP_UPSTREAM/g" \
