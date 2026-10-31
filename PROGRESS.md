@@ -70,7 +70,9 @@
 - [x] Chủ sở hữu chọn hostname riêng `books.novatechhp.vn`; DNS công khai đã phân giải qua Cloudflare, chưa thể xác nhận origin từ các IP proxy.
 - [x] Cấu hình deploy theo `APP_DOMAIN` (mặc định `books.novatechhp.vn`), render Nginx/Let's Encrypt/health checks theo hostname và giữ nguyên vhost `novabooks.novatechhp.vn`.
 - [x] Kiểm thử `npm test` (10/10), production Compose config, frontend syntax, `git diff --check` và cú pháp Bash deploy đều pass.
-- [ ] Commit/push cấu hình và xác nhận dashboard mới qua HTTPS; nếu DNS origin chưa trỏ đúng VPS, deploy có thể thất bại an toàn trước khi đổi vhost CRM.
+- [x] Commit/push cấu hình `71cd769`; GitHub Actions run `41172953836` dừng trước deploy do audit báo 8 cảnh báo moderate trong `minimatch`.
+- [x] Thêm npm override `minimatch ^11.0.1`; `npm audit --audit-level=moderate` sạch và toàn bộ 10 tests/build đều pass.
+- [ ] Commit/push dependency fix, sau đó theo dõi CI/deploy và xác nhận dashboard mới qua HTTPS; nếu DNS origin chưa trỏ đúng VPS, deploy có thể thất bại an toàn trước khi đổi vhost CRM.
 - [ ] Chạy API/RLS end-to-end test khi có PostgreSQL local; migration runner production báo schema đã up to date.
 - [ ] Nếu doanh nghiệp có workbook khác template NovaBooks, lấy file đã ẩn dữ liệu nhạy cảm để bổ sung mapping cột.
 - [ ] Task hiện tại: kiểm thử và triển khai NovaBooks lên hostname riêng `books.novatechhp.vn`, không ảnh hưởng site hiện tại.
@@ -81,7 +83,9 @@
 - [x] Đảm bảo workflow chỉ quản lý site/cert của hostname cấu hình; `novabooks.novatechhp.vn` không còn là target deploy.
 - [x] Xác nhận `books.novatechhp.vn` có DNS public (Cloudflare proxy); origin chưa thể xác nhận độc lập qua DNS.
 - [x] Kiểm thử build/test, Compose, Bash syntax, frontend và whitespace thành công.
-- [ ] Push và theo dõi workflow deploy; xác minh ứng dụng qua HTTPS trước khi đánh dấu hoàn tất.
+- [x] Push cấu hình `71cd769`; phát hiện GitHub Actions audit block do dependency cũ của ExcelJS kéo `minimatch` bị cảnh báo.
+- [x] Dùng npm override patched `minimatch@11.0.3` không đổi ExcelJS major; test Excel round-trip và 10 unit tests vẫn pass, audit 0 vulnerabilities.
+- [ ] Push audit fix và xác minh workflow deploy.
 
 ### Lượt triển khai module kho
 - [x] Đọc hướng dẫn `.ai/runs/copilot-instructions.md`, giữ nguyên workbook mẫu đang có trong worktree và xác nhận luồng Nợ/Có không phù hợp cho nhật ký nhập-xuất-tồn.
