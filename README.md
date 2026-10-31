@@ -49,7 +49,7 @@ Workflow `.github/workflows/deploy.yml` triển khai khi push vào `main` hoặc
 ### Chuẩn bị một lần trên VPS
 
 - Ubuntu/Debian server có Docker Engine + Compose plugin, Nginx, Certbot (`certbot`), `curl`, `tar`; tạo user deploy `app`, cho vào nhóm `docker`.
-- Bật SSH, mở TCP 80/443, tạo DNS cho hostname ứng dụng trỏ tới VPS (mặc định `books.novatechhp.vn`). Chỉ khai báo `AAAA` nếu IPv6 đã được định tuyến tới VPS. Có thể bật Cloudflare proxy sau khi origin và TLS hoạt động.
+- Bật SSH, mở TCP 80/443, tạo DNS cho hostname ứng dụng trỏ tới VPS (mặc định `books.novatechhp.vn`). Chỉ khai báo `AAAA` nếu IPv6 đã được định tuyến tới VPS. Với Cloudflare, để bản ghi DNS-only trong lần đầu xin chứng thư để HTTP-01 truy cập được; có thể bật proxy sau khi origin TLS hoạt động.
 - Tạo `/home/app/novabooks/.env` từ [`deploy/production.env.example`](./deploy/production.env.example), sinh `DB_ADMIN_PASSWORD`, `DB_PASSWORD` (khác nhau, chỉ gồm ký tự URL-safe), `JWT_SECRET` (ít nhất 32 ký tự ngẫu nhiên) và `ENCRYPTION_KEY` (32 byte biểu diễn bằng 64 ký tự hex). Đặt quyền `chmod 600` và owner phù hợp. Không commit file này.
 - Tạo `/var/www/certbot` và thư mục `/etc/letsencrypt/renewal-hooks/deploy`.
 - Bảo đảm `app` có thể chạy Docker và các lệnh Nginx/Certbot không tương tác. Cấu hình `sudoers` có giới hạn cho `install`, `cp`, `rm`, `ln`, `nginx -t`, `systemctl reload nginx`, `certbot certonly` và `mkdir`; không cấp `NOPASSWD: ALL`.
