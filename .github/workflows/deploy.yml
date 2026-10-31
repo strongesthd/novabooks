@@ -90,16 +90,24 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           LETSENCRYPT_EMAIL: ${{ vars.LETSENCRYPT_EMAIL }}
+          APP_DOMAIN: ${{ vars.APP_DOMAIN || 'books.novatechhp.vn' }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_SSH_PORT }}
-          envs: RUN_ID,RUN_ATTEMPT,LETSENCRYPT_EMAIL
+          envs: RUN_ID,RUN_ATTEMPT,LETSENCRYPT_EMAIL,APP_DOMAIN
           script_stop: true
           command_timeout: 30m
           script: |
             set -Eeuo pipefail
+
+            APP_DOMAIN="${APP_DOMAIN:-books.novatechhp.vn}"
+            if [[ ! "$APP_DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] \
+              || [ "${#APP_DOMAIN}" -gt 253 ]; then
+              echo "Invalid APP_DOMAIN hostname"
+              exit 1
+            fi
 
             APP_DIR=/home/app/novabooks
             RELEASE_DIR="$APP_DIR/releases/${RUN_ID}-${RUN_ATTEMPT}"
@@ -136,7 +144,7 @@ jobs:
 
             READY=0
             for attempt in $(seq 1 40); do
-              if curl --fail --silent --show-error --max-time 10 http://127.0.0.1:3015/health >/dev/null; then
+              if curl --fail --silent --max-time 10 http://127.0.0.1:3015/health >/dev/null; then
                 READY=1
                 break
               fi
@@ -148,10 +156,10 @@ jobs:
               exit 1
             fi
 
-            NGINX_SITE=/etc/nginx/sites-available/novabooks.novatechhp.vn
+            NGINX_SITE="/etc/nginx/sites-available/$APP_DOMAIN"
             test -d /etc/nginx/sites-available || { echo 'Nginx sites-available is missing'; exit 1; }
             test -d /etc/nginx/sites-enabled || { echo 'Nginx sites-enabled is missing'; exit 1; }
-            NGINX_LINK=/etc/nginx/sites-enabled/novabooks.novatechhp.vn
+            NGINX_LINK="/etc/nginx/sites-enabled/$APP_DOMAIN"
             NGINX_BACKUP=$(mktemp "$APP_DIR/.nginx-novabooks.XXXXXX")
             HAD_NGINX_SITE=0
             HAD_NGINX_LINK=0
@@ -177,9 +185,11 @@ jobs:
               rm -f "$NGINX_BACKUP"
             }
 
-            if [ ! -f /etc/letsencrypt/live/novabooks.novatechhp.vn/fullchain.pem ] \
-              || [ ! -f /etc/letsencrypt/live/novabooks.novatechhp.vn/privkey.pem ]; then
-              sudo -n install -m 644 "$RELEASE_DIR/deploy/nginx-novabooks-bootstrap.conf" "$NGINX_SITE"
+            if [ ! -f "/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem" ] \
+              || [ ! -f "/etc/letsencrypt/live/$APP_DOMAIN/privkey.pem" ]; then
+              sed "s/__APP_DOMAIN__/$APP_DOMAIN/g" \
+                "$RELEASE_DIR/deploy/nginx-novabooks-bootstrap.conf" > "$RELEASE_DIR/nginx-bootstrap.conf"
+              sudo -n install -m 644 "$RELEASE_DIR/nginx-bootstrap.conf" "$NGINX_SITE"
               sudo -n ln -sfn "$NGINX_SITE" "$NGINX_LINK"
               if ! sudo -n nginx -t || ! sudo -n systemctl reload nginx; then
                 restore_nginx
@@ -188,21 +198,23 @@ jobs:
               if [ -n "${LETSENCRYPT_EMAIL:-}" ]; then
                 if ! sudo -n certbot certonly --webroot --webroot-path /var/www/certbot \
                   --non-interactive --agree-tos --email "$LETSENCRYPT_EMAIL" \
-                  -d novabooks.novatechhp.vn; then
+                  -d "$APP_DOMAIN"; then
                   restore_nginx
                   exit 1
                 fi
               else
                 if ! sudo -n certbot certonly --webroot --webroot-path /var/www/certbot \
                   --non-interactive --agree-tos --register-unsafely-without-email \
-                  -d novabooks.novatechhp.vn; then
+                  -d "$APP_DOMAIN"; then
                   restore_nginx
                   exit 1
                 fi
               fi
             fi
 
-            sudo -n install -m 644 "$RELEASE_DIR/deploy/nginx-novabooks.conf" "$NGINX_SITE"
+            sed "s/__APP_DOMAIN__/$APP_DOMAIN/g" \
+              "$RELEASE_DIR/deploy/nginx-novabooks.conf" > "$RELEASE_DIR/nginx-production.conf"
+            sudo -n install -m 644 "$RELEASE_DIR/nginx-production.conf" "$NGINX_SITE"
             sudo -n ln -sfn "$NGINX_SITE" "$NGINX_LINK"
             if ! sudo -n nginx -t || ! sudo -n systemctl reload nginx; then
               restore_nginx
@@ -211,17 +223,19 @@ jobs:
 
             VERIFY_BODY=$(mktemp "$APP_DIR/.novabooks-dashboard.XXXXXX")
             if ! curl --noproxy '*' --fail --silent --show-error --max-time 15 \
-              --resolve novabooks.novatechhp.vn:443:127.0.0.1 \
-              --output "$VERIFY_BODY" https://novabooks.novatechhp.vn/ \
+              --resolve "$APP_DOMAIN:443:127.0.0.1" \
+              --output "$VERIFY_BODY" "https://$APP_DOMAIN/" \
               || ! grep -q 'NovaBooks' "$VERIFY_BODY"; then
+              echo "HTTPS dashboard verification failed for $APP_DOMAIN"
               rm -f "$VERIFY_BODY"
               restore_nginx
               exit 1
             fi
             rm -f "$VERIFY_BODY"
             if ! curl --noproxy '*' --fail --silent --show-error --max-time 15 \
-              --resolve novabooks.novatechhp.vn:443:127.0.0.1 \
-              https://novabooks.novatechhp.vn/api/health | grep -q '"status":"ok"'; then
+              --resolve "$APP_DOMAIN:443:127.0.0.1" \
+              "https://$APP_DOMAIN/api/health" | grep -q '"status":"ok"'; then
+              echo "HTTPS API health verification failed for $APP_DOMAIN"
               restore_nginx
               exit 1
             fi

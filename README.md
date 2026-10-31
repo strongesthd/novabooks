@@ -35,7 +35,7 @@ Mở `http://localhost:3000`. Migration được theo dõi trong `schema_migrati
 
 `docker-compose.yml` dành cho local, có fallback password chỉ để phát triển. Không dùng fallback này trong production.
 
-## Deploy tự động lên novabooks.novatechhp.vn
+## Deploy tự động lên books.novatechhp.vn
 
 Workflow `.github/workflows/deploy.yml` triển khai khi push vào `main` hoặc chạy thủ công:
 
@@ -49,7 +49,7 @@ Workflow `.github/workflows/deploy.yml` triển khai khi push vào `main` hoặc
 ### Chuẩn bị một lần trên VPS
 
 - Ubuntu/Debian server có Docker Engine + Compose plugin, Nginx, Certbot (`certbot`), `curl`, `tar`; tạo user deploy `app`, cho vào nhóm `docker`.
-- Bật SSH, mở TCP 80/443, DNS `A novabooks.novatechhp.vn` trỏ tới địa chỉ IPv4 máy chủ. Chỉ khai báo `AAAA` nếu IPv6 đã được định tuyến tới VPS.
+- Bật SSH, mở TCP 80/443, tạo DNS cho hostname ứng dụng trỏ tới VPS (mặc định `books.novatechhp.vn`). Chỉ khai báo `AAAA` nếu IPv6 đã được định tuyến tới VPS. Có thể bật Cloudflare proxy sau khi origin và TLS hoạt động.
 - Tạo `/home/app/novabooks/.env` từ [`deploy/production.env.example`](./deploy/production.env.example), sinh `DB_ADMIN_PASSWORD`, `DB_PASSWORD` (khác nhau, chỉ gồm ký tự URL-safe), `JWT_SECRET` (ít nhất 32 ký tự ngẫu nhiên) và `ENCRYPTION_KEY` (32 byte biểu diễn bằng 64 ký tự hex). Đặt quyền `chmod 600` và owner phù hợp. Không commit file này.
 - Tạo `/var/www/certbot` và thư mục `/etc/letsencrypt/renewal-hooks/deploy`.
 - Bảo đảm `app` có thể chạy Docker và các lệnh Nginx/Certbot không tương tác. Cấu hình `sudoers` có giới hạn cho `install`, `cp`, `rm`, `ln`, `nginx -t`, `systemctl reload nginx`, `certbot certonly` và `mkdir`; không cấp `NOPASSWD: ALL`.
@@ -65,15 +65,15 @@ Trong repository, tạo environment **`novabooks-production`** và thêm 4 secre
 | `VPS_SSH_PORT` | Cổng SSH |
 | `VPS_SSH_KEY` | Private key SSH của deploy user |
 
-`LETSENCRYPT_EMAIL` là GitHub Environment variable tùy chọn (không phải secret); nếu không đặt, Certbot vẫn cấp chứng thư nhưng không có email nhắc gia hạn. Reviewers/branch protection có thể cấu hình trong GitHub Environment. Không đặt SSH secrets trong YAML, commit hay application `.env`.
+`APP_DOMAIN` là GitHub Environment variable tùy chọn (không phải secret), mặc định `books.novatechhp.vn`; hãy đặt giá trị này nếu dùng hostname khác. Workflow chỉ cài Nginx vhost cho hostname cấu hình, không ghi đè các vhost khác. `LETSENCRYPT_EMAIL` cũng là variable tùy chọn; nếu không đặt, Certbot vẫn cấp chứng thư nhưng không có email nhắc gia hạn. Reviewers/branch protection có thể cấu hình trong GitHub Environment. Không đặt SSH secrets trong YAML, commit hay application `.env`.
 
 ### Kiểm tra sau khi cấu hình
 
 Push vào `main` sẽ chạy CI và deploy. Khi hoàn tất, kiểm tra:
 
 ```text
-https://novabooks.novatechhp.vn/
-https://novabooks.novatechhp.vn/api/health
+https://books.novatechhp.vn/
+https://books.novatechhp.vn/api/health
 ```
 
 Health API cần trả `{"status":"ok","service":"novabooks"}`. Tích hợp Telegram/Zalo webhook chỉ dùng được sau khi cấu hình Bot/OA credentials trong UI. Nếu cần bật AI/TTS, đặt `GEMINI_API_KEY`, `TTS_API_KEY`, `TTS_VOICE_ID` trong file VPS `.env` rồi deploy lại.

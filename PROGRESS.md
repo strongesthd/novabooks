@@ -2,7 +2,8 @@
 
 ## 1. MỤC TIÊU HIỆN TẠI (Current Goal)
 - [x] Hoàn thiện source code MVP NovaBooks: backend TypeScript/PostgreSQL multi-tenant, xác thực/RBAC, chứng từ và duyệt, Telegram/Zalo, Gemini/TTS có cấu hình, dashboard web và kiểm thử.
-- [ ] Xây module kho theo workbook `Quan_Ly_Kho_va_Dung_Cu_Xuong.xlsx`: nhập danh mục/số dư/nhật ký, theo dõi tồn theo tenant, đối chiếu OCR và ghi phiếu nhập sau duyệt.
+- [x] Xây module kho theo workbook `Quan_Ly_Kho_va_Dung_Cu_Xuong.xlsx`: nhập danh mục/số dư/nhật ký, theo dõi tồn theo tenant, đối chiếu OCR và ghi phiếu nhập sau duyệt.
+- [ ] Triển khai NovaBooks trên hostname riêng `books.novatechhp.vn`; giữ nguyên Twenty CRM tại `novabooks.novatechhp.vn`.
 
 ## 2. TIẾN ĐỘ THỰC HIỆN (Work Completed)
 - [x] Đọc `.ai/runs/copilot-instructions.md`, PROGRESS.md và tài liệu nghiệp vụ/schema hiện có.
@@ -64,11 +65,23 @@
 - `.ai/runs/copilot-instructions.md` đã đọc; cập nhật trạng thái và handover tại `PROGRESS.md`.
 
 ## 4. BƯỚC TIẾP THEO CẦN LÀM NGAY (Next Immediate Steps)
-- [x] GitHub CI pass trên `bd09769` và commit handover `32fb0c6`; deploy workflow đã chạy với đủ secrets.
-- [ ] Khắc phục bước xác minh HTTPS/vhost trong deploy: workflow chạy migration và khởi động app, nhưng verification thất bại, deploy rollback cấu hình Nginx; kiểm tra route/domain/SNI trên VPS trước khi chạy lại.
-- [ ] Xác nhận migrations 006-007 đã được đăng ký trên PostgreSQL deploy và kiểm tra API end-to-end.
+- [x] GitHub CI pass trên `bc94c40`; commit handover `3280d6c` đã push.
+- [x] Xác nhận với chủ sở hữu: DNS domain trỏ đúng VPS, nhưng không được thay site Twenty CRM hiện tại tại `novabooks.novatechhp.vn`.
+- [x] Chủ sở hữu chọn hostname riêng `books.novatechhp.vn`; DNS công khai đã phân giải qua Cloudflare, chưa thể xác nhận origin từ các IP proxy.
+- [x] Cấu hình deploy theo `APP_DOMAIN` (mặc định `books.novatechhp.vn`), render Nginx/Let's Encrypt/health checks theo hostname và giữ nguyên vhost `novabooks.novatechhp.vn`.
+- [x] Kiểm thử `npm test` (10/10), production Compose config, frontend syntax, `git diff --check` và cú pháp Bash deploy đều pass.
+- [ ] Commit/push cấu hình và xác nhận dashboard mới qua HTTPS; nếu DNS origin chưa trỏ đúng VPS, deploy có thể thất bại an toàn trước khi đổi vhost CRM.
+- [ ] Chạy API/RLS end-to-end test khi có PostgreSQL local; migration runner production báo schema đã up to date.
 - [ ] Nếu doanh nghiệp có workbook khác template NovaBooks, lấy file đã ẩn dữ liệu nhạy cảm để bổ sung mapping cột.
-- [ ] Task hiện tại: triển khai API/UI kho, ghép vật tư OCR khi duyệt, kiểm thử và cập nhật README.
+- [ ] Task hiện tại: kiểm thử và triển khai NovaBooks lên hostname riêng `books.novatechhp.vn`, không ảnh hưởng site hiện tại.
+
+### Lượt cấu hình hostname production riêng
+- [x] Đọc `.ai/runs/copilot-instructions.md`, giữ nguyên workbook untracked của người dùng.
+- [x] Thay domain hardcode bằng `APP_DOMAIN` trong deploy, Compose, Nginx và README; mặc định dùng `books.novatechhp.vn`.
+- [x] Đảm bảo workflow chỉ quản lý site/cert của hostname cấu hình; `novabooks.novatechhp.vn` không còn là target deploy.
+- [x] Xác nhận `books.novatechhp.vn` có DNS public (Cloudflare proxy); origin chưa thể xác nhận độc lập qua DNS.
+- [x] Kiểm thử build/test, Compose, Bash syntax, frontend và whitespace thành công.
+- [ ] Push và theo dõi workflow deploy; xác minh ứng dụng qua HTTPS trước khi đánh dấu hoàn tất.
 
 ### Lượt triển khai module kho
 - [x] Đọc hướng dẫn `.ai/runs/copilot-instructions.md`, giữ nguyên workbook mẫu đang có trong worktree và xác nhận luồng Nợ/Có không phù hợp cho nhật ký nhập-xuất-tồn.
@@ -83,20 +96,21 @@
 - [x] Thêm kiểm tra fixed-point để không ghi xuất làm tồn âm; chặn sửa số dư đầu kỳ, ghi xuất/cấp phát lùi ngày và lưu trữ vật tư còn tồn/cấp phát mở.
 - [x] `npm test` pass (10/10), `node --check public/app.js`, `git diff --check` và `npm audit --audit-level=moderate` đều pass (0 lỗ hổng).
 - [x] Kiểm tra trình duyệt cho trang đăng nhập/điều hướng; parser đã chạy trực tiếp trên workbook mẫu.
-- [ ] Tiếp theo: áp dụng migration 008 và chạy API/RLS integration test khi có PostgreSQL; hiện `psql` không cài và Docker daemon không phản hồi trong phiên này.
-- [x] Commit `bc94c40` đã push lên `main`; GitHub CI thành công. Workflow deploy production `41066731477` đang chạy, chưa xác nhận deploy hoàn tất.
+- [x] Deploy run `41066731477` chạy migration runner và báo database migrations up to date; chưa xác nhận API/RLS end-to-end.
+- [x] Commit `bc94c40` đã push lên `main`; GitHub CI thành công.
 
 **Files thay đổi trong lượt triển khai kho:** `src/inventory.ts`, `src/inventory-service.ts`, `src/http-error.ts`, `src/server.ts`, `src/vouchers.ts`, `src/validation.ts`, `database/migrations/008_tenant_inventory.sql`, `public/index.html`, `public/app.js`, `public/styles.css`, `tests/core.test.cjs`, `README.md`, `PROGRESS.md`.
 
 ## 5. LƯU Ý KỸ THUẬT & LỖI CẦN TRÁNH (Notes & Blockers)
 - Docker Desktop hiện ở trạng thái `paused`; `docker compose up -d` không thể khởi động DB nên migration/API chưa được chạy thực tế.
 - Typecheck/build, cú pháp frontend, 7 unit tests, `npm audit --audit-level=moderate` và `git diff --check` đã pass sau thay đổi CRUD/phân trang.
-- GitHub Actions CI pass. Deploy runs cho `bd09769` và `32fb0c6` đều thất bại tại bước `Deploy and verify`; log cho thấy migration service kết thúc và app container khởi động, nhưng kiểm tra qua HTTPS không thành công. `nginx -t` thành công; chưa xác định chính xác phản hồi HTTPS do endpoint verification không in response body.
+- GitHub Actions CI pass. Deploy runs cũ và run `41066731477` thất bại trước thông báo `NovaBooks deployment complete`. Run mới báo migrations up to date, app container started, một lần `curl (56) Connection reset by peer`, rồi `nginx -t` thành công; chưa đủ log để phân biệt lỗi HTTPS/SNI với body không khớp.
 - 5 bài test hiện là unit tests không cần DB; cần bổ sung/chạy integration tests RLS trên runtime role sau khi có PostgreSQL.
 - Không thể gửi Telegram/Zalo/TTS thật hoặc gọi Gemini nếu chưa có credentials; tích hợp phải fail rõ ràng, không giả lập thành công.
 - Giữ RLS, transaction-scoped tenant context và membership authorization; không dựa riêng vào WHERE ở repository.
 - Worker trích xuất hiện là in-process, chưa có queue/outbox bền vững; cần thay trước production. Zalo webhook signature/header cần xác nhận với phiên bản API thực tế.
 - GitHub branch `main` đã nhận source; workflow cần 4 secrets: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `VPS_SSH_PORT`. `VPS_FINGERPRINT` tùy chọn; `LETSENCRYPT_EMAIL` là variable tùy chọn.
-- DNS trả về Cloudflare proxy addresses; trang hiện tại là Twenty CRM. Deploy workflow sẽ thay cấu hình Nginx cùng hostname, nên cần chủ sở hữu xác nhận trước khi cutover.
+- Chủ sở hữu xác nhận DNS `novabooks.novatechhp.vn` trỏ đúng VPS nhưng yêu cầu giữ nguyên site Twenty CRM. Không deploy lại lên hostname này nếu chưa được cho phép cutover hoặc chuyển sang hostname riêng.
+- Chủ sở hữu chọn `books.novatechhp.vn`; DNS trả về Cloudflare proxy IP. Deploy dùng variable GitHub Environment `APP_DOMAIN` nếu cần đổi hostname, mặc định `books.novatechhp.vn`; chỉ cài vhost có hostname đó.
 - Nhập Excel hiện theo template NovaBooks cho sổ giao dịch lịch sử và trích danh mục tài khoản; chưa xác nhận tương thích workbook thực tế của doanh nghiệp.
 - Migration mới `006_ledger_accounts_and_mappings.sql` cần được chạy trên môi trường đã deploy trước khi dùng các API tài khoản/nhập Excel.

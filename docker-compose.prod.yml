@@ -48,7 +48,7 @@ services:
       DB_SSL: "false"
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the server .env}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in the server .env}
-      APP_BASE_URL: https://novabooks.novatechhp.vn
+      APP_BASE_URL: https://${APP_DOMAIN:-books.novatechhp.vn}
       UPLOAD_DIR: /app/data/uploads
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-12}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
