@@ -108,6 +108,7 @@ jobs:
               echo "Invalid APP_DOMAIN hostname"
               exit 1
             fi
+            APP_UPSTREAM="novabooks_app_$(printf '%s' "$APP_DOMAIN" | tr '.-' '__')"
 
             APP_DIR=/home/app/novabooks
             RELEASE_DIR="$APP_DIR/releases/${RUN_ID}-${RUN_ATTEMPT}"
@@ -187,7 +188,7 @@ jobs:
 
             if [ ! -f "/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem" ] \
               || [ ! -f "/etc/letsencrypt/live/$APP_DOMAIN/privkey.pem" ]; then
-              sed "s/__APP_DOMAIN__/$APP_DOMAIN/g" \
+              sed -e "s/__APP_DOMAIN__/$APP_DOMAIN/g" -e "s/__APP_UPSTREAM__/$APP_UPSTREAM/g" \
                 "$RELEASE_DIR/deploy/nginx-novabooks-bootstrap.conf" > "$RELEASE_DIR/nginx-bootstrap.conf"
               sudo -n install -m 644 "$RELEASE_DIR/nginx-bootstrap.conf" "$NGINX_SITE"
               sudo -n ln -sfn "$NGINX_SITE" "$NGINX_LINK"
@@ -212,7 +213,7 @@ jobs:
               fi
             fi
 
-            sed "s/__APP_DOMAIN__/$APP_DOMAIN/g" \
+            sed -e "s/__APP_DOMAIN__/$APP_DOMAIN/g" -e "s/__APP_UPSTREAM__/$APP_UPSTREAM/g" \
               "$RELEASE_DIR/deploy/nginx-novabooks.conf" > "$RELEASE_DIR/nginx-production.conf"
             sudo -n install -m 644 "$RELEASE_DIR/nginx-production.conf" "$NGINX_SITE"
             sudo -n ln -sfn "$NGINX_SITE" "$NGINX_LINK"
