@@ -65,7 +65,7 @@ Trong repository, tạo environment **`novabooks-production`** và thêm 4 secre
 | `VPS_SSH_PORT` | Cổng SSH |
 | `VPS_SSH_KEY` | Private key SSH của deploy user |
 
-`APP_DOMAIN` là GitHub Environment variable tùy chọn (không phải secret), mặc định `books.novatechhp.vn`; hãy đặt giá trị này nếu dùng hostname khác. Workflow chỉ cài Nginx vhost cho hostname cấu hình, không ghi đè các vhost khác. `LETSENCRYPT_EMAIL` cũng là variable tùy chọn; nếu không đặt, Certbot vẫn cấp chứng thư nhưng không có email nhắc gia hạn. Reviewers/branch protection có thể cấu hình trong GitHub Environment. Không đặt SSH secrets trong YAML, commit hay application `.env`.
+`APP_DOMAIN` là GitHub Environment variable tùy chọn (không phải secret), mặc định `books.novatechhp.vn`; hãy đặt giá trị này nếu dùng hostname khác. Workflow chỉ cài Nginx vhost cho hostname cấu hình, không ghi đè các vhost khác. Certbot đăng ký không kèm email, nên sẽ không có email nhắc gia hạn. Reviewers/branch protection có thể cấu hình trong GitHub Environment. Không đặt SSH secrets trong YAML, commit hay application `.env`.
 
 ### Kiểm tra sau khi cấu hình
 

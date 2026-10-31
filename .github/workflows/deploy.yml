@@ -89,14 +89,13 @@ jobs:
         env:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-          LETSENCRYPT_EMAIL: ${{ vars.LETSENCRYPT_EMAIL }}
           APP_DOMAIN: ${{ vars.APP_DOMAIN || 'books.novatechhp.vn' }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_SSH_PORT }}
-          envs: RUN_ID,RUN_ATTEMPT,LETSENCRYPT_EMAIL,APP_DOMAIN
+          envs: RUN_ID,RUN_ATTEMPT,APP_DOMAIN
           script_stop: true
           command_timeout: 30m
           script: |
@@ -208,17 +207,9 @@ jobs:
                 exit 1
               fi
               echo "Bootstrap Nginx vhost is active for $APP_DOMAIN"
-              case "${LETSENCRYPT_EMAIL:-}" in
-                "")
-                  CERTBOT_CONTACT_ARGS=(--register-unsafely-without-email)
-                  ;;
-                *)
-                  CERTBOT_CONTACT_ARGS=(--email "$LETSENCRYPT_EMAIL")
-                  ;;
-              esac
-              echo "Requesting Let's Encrypt certificate for $APP_DOMAIN"
+              echo "Requesting Let's Encrypt certificate without a contact email for $APP_DOMAIN"
               if ! sudo -n certbot certonly --webroot --webroot-path /var/www/certbot \
-                --non-interactive --agree-tos "${CERTBOT_CONTACT_ARGS[@]}" \
+                --non-interactive --agree-tos --register-unsafely-without-email \
                 -d "$APP_DOMAIN"; then
                 echo "Let's Encrypt certificate request failed for $APP_DOMAIN"
                 restore_nginx

@@ -77,7 +77,8 @@
 - [x] Đặt tên upstream Nginx riêng theo `APP_DOMAIN`; cú pháp Bash, production Compose, render template và diff check đều pass.
 - [x] Run `41173358712` qua CI; deploy vẫn lỗi sau khi `nginx -t` thành công và chưa có chẩn đoán bước cụ thể. `books.novatechhp.vn` vẫn chưa phục vụ NovaBooks.
 - [x] Run `41173634570` ghi nhận bootstrap Nginx được nạp; tiến trình dừng trước khi ghi log xin chứng thư, chưa rõ nguyên nhân.
-- [x] Bổ sung log từng stage, guard cấm hostname CRM và gom lựa chọn email Certbot bằng Bash `case`.
+- [x] Run `41173944904` xác định Bash syntax error near `;` tại bước bootstrap Certbot; CI pass, deploy chưa hoàn tất.
+- [x] Đơn giản hóa certbot bootstrap để luôn dùng chế độ không email, giữ stage diagnostics và guard hostname CRM.
 - [ ] Kiểm tra cú pháp, push sửa đổi và xác minh deploy tiếp theo.
 - [ ] Chạy API/RLS end-to-end test khi có PostgreSQL local; migration runner production báo schema đã up to date.
 - [ ] Nếu doanh nghiệp có workbook khác template NovaBooks, lấy file đã ẩn dữ liệu nhạy cảm để bổ sung mapping cột.
@@ -96,7 +97,8 @@
 - [x] Tạo upstream duy nhất theo hostname; Bash syntax, Compose config, template render và whitespace checks pass.
 - [x] Run `41173358712` có `nginx -t` thành công nhưng thoát lỗi trước khi log trạng thái xác minh; domain mới vẫn trả 404.
 - [x] Run `41173634570` kích hoạt bootstrap vhost `books.novatechhp.vn` nhưng dừng trước bước xin cert; site cũ không bị ghi đè.
-- [x] Bổ sung diagnostics, chặn hostname cũ và đơn giản hóa lựa chọn email Certbot.
+- [x] Bổ sung diagnostics, chặn hostname cũ; run `41173944904` lộ syntax error tại đoạn chọn email trong workflow shell.
+- [x] Bỏ nhánh email tùy chọn, dùng `--register-unsafely-without-email` như tài liệu đã mô tả khi không có email.
 - [ ] Kiểm tra/push sửa đổi và xác minh health endpoint hostname mới.
 
 ### Lượt triển khai module kho
