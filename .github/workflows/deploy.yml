@@ -108,7 +108,12 @@ jobs:
               echo "Invalid APP_DOMAIN hostname"
               exit 1
             fi
+            if [ "$APP_DOMAIN" = "novabooks.novatechhp.vn" ]; then
+              echo "Refusing to overwrite the existing site at novabooks.novatechhp.vn"
+              exit 1
+            fi
             APP_UPSTREAM="novabooks_app_$(printf '%s' "$APP_DOMAIN" | tr '.-' '__')"
+            echo "Deploying NovaBooks to $APP_DOMAIN"
 
             APP_DIR=/home/app/novabooks
             RELEASE_DIR="$APP_DIR/releases/${RUN_ID}-${RUN_ATTEMPT}"
@@ -192,11 +197,19 @@ jobs:
                 "$RELEASE_DIR/deploy/nginx-novabooks-bootstrap.conf" > "$RELEASE_DIR/nginx-bootstrap.conf"
               sudo -n install -m 644 "$RELEASE_DIR/nginx-bootstrap.conf" "$NGINX_SITE"
               sudo -n ln -sfn "$NGINX_SITE" "$NGINX_LINK"
-              if ! sudo -n nginx -t || ! sudo -n systemctl reload nginx; then
+              if ! sudo -n nginx -t; then
+                echo "Nginx configuration check failed for $APP_DOMAIN"
                 restore_nginx
                 exit 1
               fi
+              if ! sudo -n systemctl reload nginx; then
+                echo "Nginx reload failed for $APP_DOMAIN"
+                restore_nginx
+                exit 1
+              fi
+              echo "Bootstrap Nginx vhost is active for $APP_DOMAIN"
               if [ -n "${LETSENCRYPT_EMAIL:-}" ]; then
+                echo "Requesting Let's Encrypt certificate for $APP_DOMAIN"
                 if ! sudo -n certbot certonly --webroot --webroot-path /var/www/certbot \
                   --non-interactive --agree-tos --email "$LETSENCRYPT_EMAIL" \
                   -d "$APP_DOMAIN"; then
@@ -204,6 +217,7 @@ jobs:
                   exit 1
                 fi
               else
+                echo "Requesting Let's Encrypt certificate for $APP_DOMAIN"
                 if ! sudo -n certbot certonly --webroot --webroot-path /var/www/certbot \
                   --non-interactive --agree-tos --register-unsafely-without-email \
                   -d "$APP_DOMAIN"; then
@@ -217,11 +231,18 @@ jobs:
               "$RELEASE_DIR/deploy/nginx-novabooks.conf" > "$RELEASE_DIR/nginx-production.conf"
             sudo -n install -m 644 "$RELEASE_DIR/nginx-production.conf" "$NGINX_SITE"
             sudo -n ln -sfn "$NGINX_SITE" "$NGINX_LINK"
-            if ! sudo -n nginx -t || ! sudo -n systemctl reload nginx; then
+            if ! sudo -n nginx -t; then
+              echo "Nginx configuration check failed for $APP_DOMAIN"
+              restore_nginx
+              exit 1
+            fi
+            if ! sudo -n systemctl reload nginx; then
+              echo "Nginx reload failed for $APP_DOMAIN"
               restore_nginx
               exit 1
             fi
 
+            echo "Nginx vhost is active for $APP_DOMAIN; verifying HTTPS dashboard"
             VERIFY_BODY=$(mktemp "$APP_DIR/.novabooks-dashboard.XXXXXX")
             if ! curl --noproxy '*' --fail --silent --show-error --max-time 15 \
               --resolve "$APP_DOMAIN:443:127.0.0.1" \
@@ -233,14 +254,21 @@ jobs:
               exit 1
             fi
             rm -f "$VERIFY_BODY"
-            if ! curl --noproxy '*' --fail --silent --show-error --max-time 15 \
+            echo "HTTPS dashboard verified for $APP_DOMAIN; checking API health"
+            HEALTH_BODY=$(curl --noproxy '*' --fail --silent --show-error --max-time 15 \
               --resolve "$APP_DOMAIN:443:127.0.0.1" \
-              "https://$APP_DOMAIN/api/health" | grep -q '"status":"ok"'; then
+              "https://$APP_DOMAIN/api/health") || {
+                echo "HTTPS API request failed for $APP_DOMAIN"
+                restore_nginx
+                exit 1
+              }
+            if ! grep -q '"status":"ok"' <<< "$HEALTH_BODY"; then
               echo "HTTPS API health verification failed for $APP_DOMAIN"
               restore_nginx
               exit 1
             fi
 
+            echo "HTTPS API health verified for $APP_DOMAIN"
             sudo -n mkdir -p /etc/letsencrypt/renewal-hooks/deploy
             sudo -n install -m 755 "$RELEASE_DIR/deploy/certbot-reload-nginx.sh" \
               /etc/letsencrypt/renewal-hooks/deploy/novabooks-reload-nginx.sh
