@@ -72,7 +72,8 @@
 - [x] Kiểm thử `npm test` (10/10), production Compose config, frontend syntax, `git diff --check` và cú pháp Bash deploy đều pass.
 - [x] Commit/push cấu hình `71cd769`; GitHub Actions run `41172953836` dừng trước deploy do audit báo 8 cảnh báo moderate trong `minimatch`.
 - [x] Thêm npm override `minimatch ^11.0.1`; `npm audit --audit-level=moderate` sạch và toàn bộ 10 tests/build đều pass.
-- [ ] Commit/push dependency fix, sau đó theo dõi CI/deploy và xác nhận dashboard mới qua HTTPS; nếu DNS origin chưa trỏ đúng VPS, deploy có thể thất bại an toàn trước khi đổi vhost CRM.
+- [x] Commit/push dependency fix `802d608`; GitHub Actions run `41173151625` verify job đã pass.
+- [ ] Theo dõi deploy job của run `41173151625` (đang queued) và xác nhận dashboard mới qua HTTPS; nếu DNS origin chưa trỏ đúng VPS, deploy có thể thất bại an toàn trước khi đổi vhost CRM.
 - [ ] Chạy API/RLS end-to-end test khi có PostgreSQL local; migration runner production báo schema đã up to date.
 - [ ] Nếu doanh nghiệp có workbook khác template NovaBooks, lấy file đã ẩn dữ liệu nhạy cảm để bổ sung mapping cột.
 - [ ] Task hiện tại: kiểm thử và triển khai NovaBooks lên hostname riêng `books.novatechhp.vn`, không ảnh hưởng site hiện tại.
@@ -85,7 +86,8 @@
 - [x] Kiểm thử build/test, Compose, Bash syntax, frontend và whitespace thành công.
 - [x] Push cấu hình `71cd769`; phát hiện GitHub Actions audit block do dependency cũ của ExcelJS kéo `minimatch` bị cảnh báo.
 - [x] Dùng npm override patched `minimatch@11.0.3` không đổi ExcelJS major; test Excel round-trip và 10 unit tests vẫn pass, audit 0 vulnerabilities.
-- [ ] Push audit fix và xác minh workflow deploy.
+- [x] Push audit fix `802d608`; workflow verify job pass.
+- [ ] Kiểm tra kết quả deploy job và health endpoint của hostname mới.
 
 ### Lượt triển khai module kho
 - [x] Đọc hướng dẫn `.ai/runs/copilot-instructions.md`, giữ nguyên workbook mẫu đang có trong worktree và xác nhận luồng Nợ/Có không phù hợp cho nhật ký nhập-xuất-tồn.
